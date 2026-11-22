@@ -1,0 +1,29 @@
+// `auto f(…)` infers the function's result type from its body, as a local's
+// `auto` does; a closure result is the `Fn<…>` of its signature. It was C's
+// `auto` storage class with an implicit `int`: `auto f() { return 1.5; }`
+// returned 1, and returning a lambda was an error. Returns 42.
+struct P { int a; int b; };
+
+int called_early();
+auto half(int x) { return x / 2.0; }
+auto label(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "n" + d; }
+auto adder(int n) { return [n](int x) => x + n; }
+auto mkp() { P p; p.a = 1; p.b = 2; return p; }
+async auto scaler(int n) { return [n](int x) => x * n; }
+int called_early() { double d = half(5); return d == 2.5 ? 1 : 0; }
+
+int main() {
+    int r = 0;
+    double h = half(7);
+    if (h == 3.5 && called_early() == 1) r += 1;
+    string s = label(3);
+    if (s == "n3") r += 1;
+    Fn<int(int)> f = adder(40);
+    auto g = adder(1);
+    if (f(2) == 42 && g(1) == 2) r += 1;
+    P p = mkp();
+    if (p.b == 2) r += 1;
+    Fn<int(int)> m = await scaler(3);
+    if (m(5) == 15) r += 1;
+    return r == 5 ? 42 : r;
+}

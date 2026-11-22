@@ -2334,6 +2334,36 @@ impl<'m> Lowerer {
     /// Infer a body's scalar return type (for a lambda with no explicit `-> T`):
     /// the type of the first `return <expr>;`, evaluated with the params in scope.
     /// A body with no value-return is a `void` lambda.
+    /// The result type of a sic `auto f(…)` function: its first `return`'s, a
+    /// closure as the `Fn<…>` of its signature, so the function's type does
+    /// not depend on what the lambda captures.
+    pub(crate) fn infer_auto_result(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Type {
+        // The locals the body declares with a type (`P p; …; return p;`).
+        let mut locals = Vec::new();
+        fn scan(l: &Lowerer, ss: &[Stmt], out: &mut Vec<(String, Type)>) {
+            for st in ss {
+                match st {
+                    Stmt::Decl(Decl::Var { declarators, .. }) => {
+                        for d in declarators {
+                            if matches!(d.ty.storage, Some(StorageClass::Auto)) || matches!(d.ty.ty, AstType::Auto) { continue; }
+                            if let Ok(t) = lower_type(&d.ty, &l.struct_types, l.ptr_size) { out.push((d.name.clone(), t)); }
+                        }
+                    }
+                    Stmt::Block(b, _) => scan(l, b, out),
+                    Stmt::If { then, else_, .. } => {
+                        scan(l, std::slice::from_ref(then.as_ref()), out);
+                        if let Some(e) = else_ { scan(l, std::slice::from_ref(e.as_ref()), out); }
+                    }
+                    Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => scan(l, std::slice::from_ref(body.as_ref()), out),
+                    _ => {}
+                }
+            }
+        }
+        scan(self, body, &mut locals);
+        let t = self.infer_body_return_type_ext(body, params, ir_params, &locals);
+        super::types::closure_as_fn(&t, self.ptr_size).unwrap_or(t)
+    }
+
     pub(crate) fn infer_body_return_type(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Type {
         self.infer_body_return_type_ext(body, params, ir_params, &[])
     }
@@ -2456,7 +2486,12 @@ impl<'m> Lowerer {
             fields.push((format!("p{}", i), pty.clone()));
             pnames.push((pn, pty));
         }
-        let elem = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+        let elem = if super::auto_result(self.sic, storage, ret_ty) {
+            let ps: Vec<Type> = pnames.iter().map(|(_, t)| t.clone()).collect();
+            self.infer_auto_result(body, params, &ps)
+        } else {
+            lower_type(ret_ty, &self.struct_types, self.ptr_size)?
+        };
         let frame_ty = Type::Struct(sic_ir::StructType::plain(None, fields, false));
 
         // The body, as an ordinary function.
@@ -2464,7 +2499,9 @@ impl<'m> Lowerer {
         for (i, (_, pty)) in pnames.iter().enumerate() {
             if super::types::is_tuple(pty) { self.tuple_param_types.insert((inner.clone(), i), pty.clone()); }
         }
-        self.lower_function(&inner, ret_ty, params, false, body, &Some(StorageClass::Static), false, None, false)?;
+        // An `auto` result: the body infers its own (a closure stays concrete there).
+        let inner_ret = if super::auto_result(self.sic, storage, ret_ty) { QualType::new(AstType::Auto) } else { ret_ty.clone() };
+        self.lower_function(&inner, &inner_ret, params, false, body, &Some(StorageClass::Static), false, None, false)?;
         let runner = self.synthesize_task_runner(name, &inner, &frame_ty, &elem, params.len())?;
         let rdrop = if self.managed_value_type(&elem) { Some(self.value_drop_fn(&elem)?) } else { None };
 
@@ -2770,13 +2807,20 @@ impl<'m> Lowerer {
         } else if self.sic && matches!(ret_ty.ty, AstType::Auto) {
             // sic lambda (sic.md §"Lambdas"): infer the return type from the body.
             self.infer_body_return_type(body, params, &ir_params)
+        } else if super::auto_result(self.sic, storage, ret_ty) {
+            // sic `auto f(…)`: the body's result type, a closure as its `Fn<…>`.
+            self.infer_auto_result(body, params, &ir_params)
         } else {
             lower_type(ret_ty, &self.struct_types, self.ptr_size)?
         };
         // sic `async` (sic.md §"Async"): the function returns a `Task<ret>`; its
         // body (`lower_async_function`) starts the task.
         let (ir_ret, async_spawn) = if is_async {
-            (self.task_of(&ir_ret), self.pending_async.take())
+            // The task's result type is the spawn's (an `auto` one inferred
+            // from the async body, not from this spawner's).
+            let a = self.pending_async.take();
+            let elem = a.as_ref().map_or(ir_ret, |a| a.elem.clone());
+            (self.task_of(&elem), a)
         } else {
             (ir_ret, None)
         };

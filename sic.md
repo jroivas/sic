@@ -1721,6 +1721,11 @@ parameter, a return type, or a variable — use `Fn<ret(params)>`:
     Fn<int(int)> a = adder(40);               // store one
     a(2);
 
+A function may write `auto` for its result type, which is then its body's (its
+first `return`'s), as a local's `auto` is; a closure result is the `Fn<…>` of its
+signature, so `auto adder(int n) { return [n](int x) => x + n; }` returns an
+`Fn<int(int)>`. (`auto` is never C's storage class with an implicit `int` in SIC.)
+
 Lambdas cross the [module](#imports) boundary: a module can take a closure
 parameter, return a closure, and export a module-level lambda (a captureless
 lambda bound to a function pointer at file scope).

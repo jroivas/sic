@@ -134,6 +134,9 @@
   key reads as `None`.
 - An async function takes a plain `tuple` parameter, static or dynamic as
   its calls give it (it was a compile error).
+- `auto f(…)` infers the function's result type from its body (a closure as its
+  `Fn<…>`), `async auto` too: it was C's `auto` storage class with an implicit
+  `int`, so `auto f() { return 1.5; }` returned 1 and returning a lambda failed.
 - A float or `fixed` value never converts to an integer or `bool` implicitly
   (initialization, assignment, `return`, arguments, container stores, globals):
   a cast does it. An `any` holding a float read as an integer without a cast

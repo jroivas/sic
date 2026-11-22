@@ -901,6 +901,18 @@ pub fn closure_env_type(env_name: &str, code_fn_ty: &FunctionType, caps: &[(Stri
     Type::Struct(StructType::plain(Some(env_name.to_string()), fields, false))
 }
 
+/// The `Fn<…>` type of a closure value of type `t` (its callable signature),
+/// or None for anything else.
+pub fn closure_as_fn(t: &Type, ptr_size: u32) -> Option<Type> {
+    if !is_closure(t) { return None; }
+    let Type::Pointer(inner) = t else { return None };
+    let Type::Struct(st) = inner.as_ref() else { return None };
+    let code = st.fields.iter().find(|(n, _)| n == "__code").map(|(_, t)| t)?;
+    let Type::Pointer(f) = code else { return None };
+    let Type::Function(sig) = f.as_ref() else { return None };
+    Some(closure_fn_type(sig.ret.clone(), sig.params.iter().skip(1).cloned().collect(), ptr_size))
+}
+
 /// The type of a nameable `Fn<ret(params)>` closure (sic.md §"Lambdas"): a pointer
 /// to a minimal environment "header" `{ __code }`. Every concrete closure's
 /// environment begins with the same `__code` field, so a concrete closure is

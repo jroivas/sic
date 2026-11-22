@@ -91,6 +91,14 @@ Fn<int(int)> a = adder(40);                       // store one
 a(2);                                             // 42
 ```
 
+A function that writes `auto` for its result type gets its body's, a closure as its
+`Fn<…>` — so it need not spell the signature:
+
+```sic
+auto adder(int n) { return [n](int x) => x + n; }   // returns Fn<int(int)>
+auto half(int x)  { return x / 2.0; }               // returns double
+```
+
 A captureless lambda passed where an `Fn<…>` is expected is boxed into a closure
 automatically, so an `Fn<int(int)>` parameter accepts both stateful closures and
 plain `[](int x){…}` lambdas. (A plain `int(*)(int)` function-pointer type also

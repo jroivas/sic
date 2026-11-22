@@ -901,7 +901,7 @@ impl Lowerer {
                     self.module.add_extern(ExternFunc { name: name.clone(), sig });
                 }
             }
-            Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, is_async, .. } => {
+            Decl::Func { name, ret_ty, params, variadic, body: Some(fbody), storage, inline, type_params, is_async, .. } => {
                 // sic generic template: not emitted directly; instantiated per call.
                 if !type_params.is_empty() { return Ok(()); }
                 // Register any struct/union/enum defined in the return type or
@@ -923,15 +923,21 @@ impl Lowerer {
                     return Ok(());
                 }
                 // Function definition — pre-register with empty body for stable FuncRef
-                let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                let ir_params: Vec<Type> = params.iter().map(|p| {
+                    lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
+                }).collect::<Result<Vec<_>>>()?;
+                let mut ir_ret = if auto_result(self.sic, storage, ret_ty) {
+                    // sic `auto f(…)`: the body's result type, known to every
+                    // caller lowered before the body is.
+                    self.infer_auto_result(fbody, params, &ir_params)
+                } else {
+                    lower_type(ret_ty, &self.struct_types, self.ptr_size)?
+                };
                 // sic async: the signature returns `Task<ret>` (sic.md §"Async").
                 if *is_async {
                     ir_ret = self.task_of(&ir_ret);
                 }
-                let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-                    lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
-                }).collect();
-                let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                let sig = build_fn_sig(ir_ret, ir_params, *variadic, self.ptr_size);
                 types::note_global_var(name, &Type::Function(Box::new(sig.clone())));
                 // Register the DEFINED function even when a prior forward
                 // declaration only produced an extern (e.g. `static void f();`
@@ -6501,3 +6507,9 @@ pub(crate) fn pointee_quals(qt: &QualType) -> Option<Vec<(bool, bool)>> {
 /// The generic operations on an `any`'s value (`Lowerer::ensure_any_op_fn`).
 #[derive(Clone, Copy)]
 enum AnyOp { Retain, Release, FromWord, Clone }
+
+/// A sic function written `auto f(…)` (the `auto` storage class, with C's
+/// implicit `int`): its result type is inferred from its body, not `int`.
+pub(crate) fn auto_result(sic: bool, storage: &Option<StorageClass>, ret_ty: &QualType) -> bool {
+    sic && matches!(storage, Some(StorageClass::Auto)) && matches!(ret_ty.ty, AstType::Int { signed: true })
+}
