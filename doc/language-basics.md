@@ -76,6 +76,23 @@ int a = 10, b = 0;
 
 Inside `unsafe` it traps (catchable with `divide_by_zero { ... }`).
 
+## No implicit float to integer
+
+A float or `fixed` value never becomes an integer (or a `bool`) implicitly — at an
+initialization, assignment, `return`, argument or container store — since that
+would silently drop the fraction (and C leaves an out-of-range conversion
+undefined). Cast to say you mean it:
+
+```sic
+double d = 2.75;
+int a = (int)d;               // 2
+int b = d;                    // error: a `double` value does not convert to `i32` implicitly
+long c = (long)(d * 4);       // 11
+```
+
+An `any` holding a float that is read as an integer without a cast stops the
+program; `(int)a` converts it. Integers still widen to floats implicitly.
+
 ## Shifts and rotates
 
 Shift results are fully specified:

@@ -130,6 +130,16 @@ f80 hp = 1.5;
 Use `fixed` when you need exact decimal results (money, accounting); use floats
 for approximate scientific math.
 
+A float or `fixed` value never becomes an integer implicitly — only a cast drops
+the fraction (see [defined behavior](language-basics.md#no-implicit-float-to-integer)).
+An integer converts to a float or `fixed`, and a float to `fixed`, exactly:
+
+```sic
+double d = 2.75;
+int n = (int)d;               // 2 — `int n = d;` is a compile error
+fixed q = d;                  // exactly 2.75
+```
+
 ## `bool`
 
 `bool` is a distinct boolean type; `true` and `false` are `bool`-typed literals
