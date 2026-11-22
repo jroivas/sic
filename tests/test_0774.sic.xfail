@@ -1,0 +1,1 @@
+a `fixed` value does not convert to `i32` implicitly

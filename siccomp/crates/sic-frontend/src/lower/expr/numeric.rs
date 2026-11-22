@@ -324,10 +324,30 @@ impl<'m> FuncCtx<'m> {
             let r = self.emit_rat_call("__sic_rat_from_decimal", vec![s, scale])?;
             return Ok((r, i, f, true));
         }
+        // `-x`: 0 - x, exactly (`fixed y = -1.5;` was taken for an integer and
+        // truncated to -1).
+        if let ExprKind::Unary { op: crate::ast::UnOpKind::Neg, expr: inner } = &e.kind {
+            if !matches!(self.infer_expr_type(inner), Ok(Type::Int { .. } | Type::Bool)) {
+                let (r, i, f, owned) = self.fixed_operand_owned(inner)?;
+                let z = self.coerce(Constant::int(0), &Type::i64())?;
+                let zero = self.emit_rat_call("__sic_rat_from_i64", vec![z])?;
+                let n = self.emit_rat_call("__sic_rat_sub", vec![zero.clone(), r.clone()])?;
+                self.rat_free_now(zero)?;
+                if owned { self.rat_free_now(r)?; }
+                return Ok((n, i, f, true));
+            }
+        }
         let ty = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
         if let Some((i, f)) = super::super::types::fixed_dims(&ty) {
             let r = self.lower_expr(e)?; // borrowed rational pointer
             return Ok((r, i, f, false));
+        }
+        // A float: the exact rational its value is (it was truncated).
+        if ty.is_float() {
+            let v = self.lower_expr(e)?;
+            let d = self.coerce(v, &Type::Float64)?;
+            let r = self.emit_rat_call("__sic_rat_from_double", vec![d])?;
+            return Ok((r, 19, 17, true));
         }
         // An integer → an exact rational with denominator 1.
         let v = self.lower_expr(e)?;

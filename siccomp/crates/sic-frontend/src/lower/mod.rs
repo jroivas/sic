@@ -2414,8 +2414,14 @@ impl Lowerer {
     /// other kind's slot already holds the integer, so it passes through. A null `ty`
     /// passes the bits through. Lets `any a = 3.5; int i = a;` yield 3 (not the bit
     /// pattern), i.e. a real numeric conversion rather than a reinterpret.
-    pub(crate) fn ensure_any_to_i64_fn(&mut self) -> FuncRef {
-        if let Some(f) = self.module.func_ref_by_name("__sic_any_to_i64") { return f; }
+    /// `strict`: an `any` read as an integer without a cast (sic.md §"Limit
+    /// undefined behavior": a float or `fixed` never converts to an integer
+    /// implicitly) — one holding a float or a `fixed` stops the program
+    /// (`__sic_any_int_fail`) instead of being truncated.
+    pub(crate) fn ensure_any_to_i64_fn(&mut self, strict: bool) -> FuncRef {
+        let name = if strict { "__sic_any_to_i64_strict" } else { "__sic_any_to_i64" };
+        if let Some(f) = self.module.func_ref_by_name(name) { return f; }
+        let fail = if strict { Some(self.ensure_any_int_fail_fn()) } else { None };
         let u64_ty = Type::u64();
         let i64_ty = Type::i64();
         let u32_ty = Type::Int { bits: 32, signed: false };
@@ -2425,7 +2431,7 @@ impl Lowerer {
             sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
             sic_ir::Param { name: "slot".to_string(), ty: u64_ty.clone() },
         ];
-        let mut func = Function::new("__sic_any_to_i64".to_string(), sig, params, Linkage::Internal);
+        let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
         {
@@ -2451,7 +2457,20 @@ impl Lowerer {
             fc.push_instr(Instr::BinOp { dest: km4, op: BinOp::Sub, lhs: Val::Local(kind), rhs: Constant::int(4), ty: u32_ty.clone() });
             let is_f = fc.alloc_val();
             fc.push_instr(Instr::Cmp { dest: is_f, op: CmpOp::IULe, lhs: Val::Local(km4), rhs: Constant::int(2), ty: u32_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_f), then_bb: fbb, else_bb: passthru_bb });
+            if let Some(fail) = fail {
+                // A float or a `fixed` (kind 10): no implicit integer.
+                let is_fx = fc.alloc_val();
+                fc.push_instr(Instr::Cmp { dest: is_fx, op: CmpOp::IEq, lhs: Val::Local(kind), rhs: Constant::int(10), ty: u32_ty.clone() });
+                let bad = fc.alloc_val();
+                fc.push_instr(Instr::BinOp { dest: bad, op: BinOp::Or, lhs: Val::Local(is_f), rhs: Val::Local(is_fx), ty: Type::Bool });
+                let fail_bb = fc.new_block_after_current();
+                fc.set_terminator(Terminator::CondJump { cond: Val::Local(bad), then_bb: fail_bb, else_bb: passthru_bb });
+                fc.switch_to_block(fail_bb);
+                fc.push_instr(Instr::Call { dest: None, func: fail, args: vec![ty_arg.clone()], ret_ty: Type::Void });
+                fc.set_terminator(Terminator::Jump(passthru_bb));
+            } else {
+                fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_f), then_bb: fbb, else_bb: passthru_bb });
+            }
             // float: truncate `*(double*)&slot`. Reinterpret the slot's bits as a
             // double via a memory round-trip — an int↔float `BitCast` would CONVERT
             // the value, not reinterpret the bits.
@@ -2469,6 +2488,44 @@ impl Lowerer {
             let n2 = fc.alloc_val();
             fc.push_instr(Instr::Cast { dest: n2, op: CastOp::BitCast, val: slot_arg, to_ty: i64_ty.clone() });
             fc.set_terminator(Terminator::Ret(Some(Val::Local(n2))));
+        }
+        self.module.add_function(func)
+    }
+
+    /// `void __sic_any_int_fail(type *ty)`: an `any` holding a float or a `fixed`
+    /// was read as an integer without a cast. Says so on stderr and aborts.
+    fn ensure_any_int_fail_fn(&mut self) -> FuncRef {
+        let name = "__sic_any_int_fail";
+        if let Some(f) = self.module.func_ref_by_name(name) { return f; }
+        let voidp = Type::void_ptr();
+        let u64_ty = Type::u64();
+        let ext = |s: &mut Self, n: &str, params: Vec<Type>, ret: Type| s.module.func_ref_by_name(n).unwrap_or_else(||
+            s.module.add_extern(ExternFunc { name: n.to_string(), sig: FunctionType { ret, params, variadic: false } }));
+        let write = ext(self, "write", vec![Type::i32(), voidp.clone(), u64_ty.clone()], Type::i64());
+        let strlen = ext(self, "strlen", vec![voidp.clone()], u64_ty.clone());
+        let abort = ext(self, "abort", vec![], Type::Void);
+        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+        let params = vec![sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() }];
+        let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let ty_arg = Val::Local(ValId(0x10000));
+            let put = |fc: &mut func::FuncCtx, text: &str| {
+                let p = fc.emit_cstring(text);
+                let n = Constant::uint(text.len() as u64);
+                fc.push_instr(Instr::Call { dest: None, func: write, args: vec![Constant::int(2), p, n], ret_ty: Type::i64() });
+            };
+            put(&mut fc, "sic: an `any` holding a `");
+            let np = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: np, ptr: ty_arg, ty: voidp.clone() });
+            let len = fc.alloc_val();
+            fc.push_instr(Instr::Call { dest: Some(len), func: strlen, args: vec![Val::Local(np)], ret_ty: u64_ty.clone() });
+            fc.push_instr(Instr::Call { dest: None, func: write, args: vec![Constant::int(2), Val::Local(np), Val::Local(len)], ret_ty: Type::i64() });
+            put(&mut fc, "` was read as an integer: a float or fixed value converts to one only by a cast\n");
+            fc.push_instr(Instr::Call { dest: None, func: abort, args: vec![], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Ret(None));
         }
         self.module.add_function(func)
     }
@@ -3850,6 +3907,26 @@ impl Lowerer {
     /// constant is an error, not a silently zero-filled object. (C keeps the
     /// lenient zero-fill.)
     fn check_global_init(&mut self, d: &Declarator) -> Result<()> {
+        // sic: a float or `fixed` initializer of an integer (or `bool`) global
+        // is the implicit conversion `coerce` rejects in a function: it was
+        // folded and truncated.
+        if self.sic {
+            if let (Some(Initializer::Expr(e)), Ok(target)) = (&d.init, lower_type(&d.ty, &self.struct_types, self.ptr_size)) {
+                if matches!(target, Type::Int { .. } | Type::Bool) {
+                    let mut f = Function::new(String::new(), FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+                    let src = func::FuncCtx::new_with_func(self, &mut f).infer_expr_type(e);
+                    if let Ok(src) = src {
+                        if src.is_float() || types::is_fixed(&src) {
+                            let what = if src.is_float() { func::type_desc(&src) } else { "fixed".to_string() };
+                            let to = func::type_desc(&target);
+                            return Err(CompileError::at(format!(
+                                "a `{}` value does not convert to `{}` implicitly — cast it (`({}) x`) to drop the fraction",
+                                what, to, to), e.span.file.clone(), e.span.line, e.span.col));
+                        }
+                    }
+                }
+            }
+        }
         let at = self.global_init_bad_element.take();
         if std::mem::take(&mut self.global_init_unserializable) {
             let sp = at.unwrap_or_else(|| d.span.clone());
@@ -5157,7 +5234,19 @@ impl Lowerer {
             }
         }
 
-        let ret = fc.coerce(last_val, &Type::i32())?;
+        // The program's value is its exit status, an integer: a float or
+        // `fixed` value becomes one only by a cast (sic.md §"Limit undefined
+        // behavior").
+        let ret = fc.coerce(last_val, &Type::i32()).map_err(|e| {
+            let at = tu.decls.iter().rev().find_map(|d| match d { Decl::ExprStmt(e, _) => Some(e.span.clone()), _ => None });
+            match at {
+                Some(sp) if e.file.is_none() => CompileError::at(format!(
+                    "the program's value is its exit status, an `i32`: {} (`(int)(…)`)",
+                    e.message.split(" — ").next().unwrap_or(&e.message).to_string() + " — cast it"),
+                    sp.file, sp.line, sp.col),
+                _ => e,
+            }
+        })?;
         fc.set_terminator(Terminator::Ret(Some(ret)));
         drop(fc);
 

@@ -1,4 +1,6 @@
--10 +
+// The program is one expression; its exit status is an integer, so the
+// float value is cast (a float never converts to an integer implicitly).
+(int)(-10 +
 -0.5 +
 -4. +
--.6;
+-.6);

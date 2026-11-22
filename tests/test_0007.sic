@@ -1,1 +1,3 @@
-11.5 % 6;
+// The program is one expression; its exit status is an integer, so the
+// float value is cast (a float never converts to an integer implicitly).
+(int)(11.5 % 6);

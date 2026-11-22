@@ -1,0 +1,1 @@
+a `double` value does not convert to `i32` implicitly

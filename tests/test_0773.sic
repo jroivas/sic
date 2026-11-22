@@ -1,0 +1,2 @@
+// a float or fixed value never converts to an integer implicitly
+int main() { double d = 2.5; int x = d; return x; }

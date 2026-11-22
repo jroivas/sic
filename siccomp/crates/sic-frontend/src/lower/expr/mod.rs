@@ -362,6 +362,22 @@ impl<'m> FuncCtx<'m> {
         Ok(handle)
     }
 
+    /// The 64-bit slot for the number `v` of type `ty`: a float's bits, an
+    /// integer widened.
+    fn number_slot(&mut self, v: Val, ty: &Type) -> Result<Val> {
+        if matches!(ty, Type::Float32 | Type::Float64 | Type::Float80) {
+            let d = self.coerce(v, &Type::Float64)?;
+            let mem = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: mem, ty: Type::Float64, align: None });
+            self.push_instr(Instr::Store { val: d, ptr: Val::Local(mem) });
+            let out = self.alloc_val();
+            self.push_instr(Instr::Load { dest: out, ptr: Val::Local(mem), ty: Type::u64() });
+            self.val_types.insert(out.0, Type::u64());
+            return Ok(Val::Local(out));
+        }
+        self.coerce(v, &Type::u64())
+    }
+
     /// The 64-bit `slot` stored in an `any` for a value of type `ty`.
     fn box_slot(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
         // Store the value's address. `fixed`/`bigint`/pointer rvalues are already a
@@ -401,7 +417,11 @@ impl<'m> FuncCtx<'m> {
     /// or an aggregate pointer (string/fixed/bigint/…). No runtime type check yet.
     fn unbox_any(&mut self, inner: &Expr, target: &Type, _sp: &crate::lexer::Span) -> Result<Val> {
         let p = self.lower_aggregate_ptr(inner)?;
-        self.unbox_any_val(p, target)
+        // A cast: a float or `fixed` it holds may become an integer.
+        let prev = std::mem::replace(&mut self.explicit_conv, true);
+        let r = self.unbox_any_val(p, target);
+        self.explicit_conv = prev;
+        r
     }
 
     /// Downcast an already-lowered `any` value (a pointer to the `{ ty, slot }`
@@ -442,7 +462,7 @@ impl<'m> FuncCtx<'m> {
                 self.val_types.insert(d.0, Type::Float64);
                 return self.coerce(Val::Local(d), target);
             } else {
-                let f = self.lowerer.ensure_any_to_i64_fn();
+                let f = self.lowerer.ensure_any_to_i64_fn(!self.explicit_conv);
                 let n = self.alloc_val();
                 self.push_instr(Instr::Call { dest: Some(n), func: f, args: vec![tyv, slot_u64], ret_ty: Type::i64() });
                 self.val_types.insert(n.0, Type::i64());
@@ -1320,7 +1340,12 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
                 let v = self.lower_expr(inner)?;
-                self.coerce(v, &target)
+                // The cast is the conversion written out: a float may become an
+                // integer here, nowhere implicitly (`coerce`).
+                let prev = std::mem::replace(&mut self.explicit_conv, true);
+                let r = self.coerce(v, &target);
+                self.explicit_conv = prev;
+                r
             }
 
             ExprKind::SizeofType(ty) => {
@@ -2662,6 +2687,14 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: c, to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
+        } else if self.is_sic() && is_number(v) && is_number(&ety) && *v != ety {
+            // A number stored into a numeric element converts to the element's
+            // type first (as an assignment does, the float → integer rule
+            // included): its bits were stored as they were, so `3` in a
+            // `list<double>` read back as 1.5e-323.
+            let x = self.lower_expr(val)?;
+            let x = self.coerce(x, v)?;
+            self.number_slot(x, v)?
         } else {
             self.box_slot(val, &ety)?
         };
@@ -6766,6 +6799,13 @@ impl<'m> FuncCtx<'m> {
                     let a = self.to_bigint(inner)?;
                     return self.call_bigint_new("__sic_bi_neg", vec![a]);
                 }
+                // sic `fixed` negation, exactly (it negated the rational's pointer).
+                if self.is_sic() && self.is_fixed_typed(inner) {
+                    let neg = Expr::new(ExprKind::Unary { op: UnOpKind::Neg, expr: Box::new(inner.clone()) }, inner.span.clone());
+                    let (r, _, _) = self.fixed_operand(&neg)?;
+                    if let (Val::Local(id), Ok(t)) = (&r, self.infer_expr_type(inner)) { self.val_types.insert(id.0, t); }
+                    return Ok(r);
+                }
                 if let Ok(vt @ Type::Array { .. }) = self.infer_expr_type(inner) {
                     return self.lower_vector_unary(true, inner, &vt);
                 }
@@ -8607,4 +8647,9 @@ fn side_effect_free(e: &Expr) -> bool {
             side_effect_free(lhs) && side_effect_free(rhs),
         _ => false,
     }
+}
+
+/// An integer, `bool` or float type (a number a container element converts to).
+fn is_number(t: &Type) -> bool {
+    matches!(t, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80)
 }

@@ -1,0 +1,3 @@
+// a float or fixed value never converts to an integer implicitly
+int take(int v) { return v; }
+int main() { fixed<4,2> q = 1.25; return take(q); }

@@ -21,7 +21,7 @@ int main() {
 
     // RTTI-driven NUMERIC conversion (not a bit-reinterpret):
     double id = i;             // any(int 42) -> double 42.0
-    int    fi = f;             // any(double 3.5) -> int 3 (truncated)
+    int    fi = (int)f;        // any(double 3.5) -> int 3: only a cast truncates
     if (id != 42.0) return 11;
     if (fi != 3) return 12;
 

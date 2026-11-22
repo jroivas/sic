@@ -75,8 +75,9 @@ f(a);                          // an `any` argument unboxes to the parameter typ
 ```
 
 Numeric unboxing is **type-directed**: it converts by the boxed value's runtime
-kind, so `any n = 3; double d = n;` yields `3.0` and `any r = 3.5; int i = r;`
-yields `3` — not a bit reinterpretation. Read an `any` back as a type compatible
+kind, so `any n = 3; double d = n;` yields `3.0` — not a bit reinterpretation. A
+float never becomes an integer implicitly: `any r = 3.5; int i = r;` stops the
+program, and `(int)r` yields `3`. Read an `any` back as a type compatible
 with what it holds (a non-numeric mismatch, e.g. reading a boxed string as an
 `int`, still just reinterprets the slot).
 

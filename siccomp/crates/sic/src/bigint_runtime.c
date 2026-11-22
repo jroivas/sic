@@ -471,6 +471,25 @@ __attribute__((weak)) __sic_rat *__sic_rat_from_i64(long long v) {
     return __sic_rat_wrap(__sic_bi_from_i64(v), __sic_bi_from_i64(1));
 }
 
+/* The exact rational a double is (a finite double is m * 2^e); an infinity
+   or a NaN, which no rational is, gives 0. */
+__attribute__((weak)) __sic_rat *__sic_rat_from_double(double d) {
+    unsigned long long u = *(unsigned long long *)&d;
+    int neg = (int)(u >> 63);
+    unsigned ex = (unsigned)((u >> 52) & 0x7ff);
+    unsigned long long m = u & 0xfffffffffffffULL;
+    if (ex == 0x7ff) return __sic_rat_from_i64(0);
+    int e;
+    if (ex == 0) e = -1074;
+    else { m |= 1ULL << 52; e = (int)ex - 1075; }
+    __sic_bi *num = __sic_bi_from_u64(m);
+    if (neg) { __sic_bi *t = __sic_bi_neg(num); __sic_bi_free(num); num = t; }
+    __sic_bi *den = __sic_bi_from_u64(1);
+    if (e > 0) { __sic_bi *t = __sic_bi_shl(num, (unsigned)e); __sic_bi_free(num); num = t; }
+    else if (e < 0) { __sic_bi *t = __sic_bi_shl(den, (unsigned)-e); __sic_bi_free(den); den = t; }
+    return __sic_rat_wrap(num, den);
+}
+
 /* Build from a decimal literal's digits + fraction scale: digits / 10^scale. */
 __attribute__((weak)) __sic_rat *__sic_rat_from_decimal(const char *digits, int scale) {
     __sic_bi *num = __sic_bi_from_str(digits);

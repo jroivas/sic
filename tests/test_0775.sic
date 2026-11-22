@@ -1,0 +1,2 @@
+// a float or fixed value never converts to an integer implicitly
+int main() { list<int> l; float f = 1.5; l.add(f); return 0; }

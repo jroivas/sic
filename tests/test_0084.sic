@@ -32,4 +32,8 @@ int main()
     b /= 1;
     b *= 1;
     b %= 1;
+
+    // Without it `main` would return its last local, `b`, a `double`: a float
+    // does not convert to `int` implicitly.
+    return 0;
 }

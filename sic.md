@@ -21,6 +21,14 @@ The reason is to avoid hard-to-debug undefined behavior. Our thesis is that the
 compiler can produce good enough code even with these rules, while saving the
 human time such bugs cost.
 
+### No implicit float-to-integer conversion
+
+A float or `fixed` value never becomes an integer (or a `bool`) implicitly — not at
+an initialization, assignment, `return`, argument or container store — since it
+would silently drop the fraction (and an out-of-range float is undefined in C).
+Write the cast: `int n = (int)d;`. An `any` holding a float that is read as an
+integer without a cast stops the program. Integers still widen to floats.
+
 ### Initialized variables
 
 All variables are initialized to 0 (or logically similar).

@@ -1,0 +1,8 @@
+// An `any` holding a float, read as an integer without a cast, stops the
+// program (a float becomes an integer only by a cast): it was truncated.
+// The expected exit is SIGABRT's.
+int main() {
+    any a = 2.5;
+    int n = a;
+    return n;
+}

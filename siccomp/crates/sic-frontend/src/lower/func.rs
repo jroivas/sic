@@ -464,6 +464,10 @@ pub struct FuncCtx<'m> {
     /// sic `async` (sic.md §"Async"): in the function that starts an async
     /// function's task, what `__sic_async_spawn()` (its whole body) needs.
     pub async_spawn: Option<AsyncSpawn>,
+    /// sic: the conversion being made is a cast's, written out — the one place
+    /// a float or `fixed` may become an integer (sic.md §"Limit undefined
+    /// behavior"); `coerce` rejects it anywhere else.
+    pub explicit_conv: bool,
     /// sic `va_dict` (sic.md §"Named parameters"): dict handles packed for a call's
     /// named arguments, freed at the end of the statement (the callee consumes the
     /// va_dict during the call and never keeps it).
@@ -582,6 +586,7 @@ impl<'m> FuncCtx<'m> {
             list_temps: Vec::new(),
             container_temps: Vec::new(),
             async_spawn: None,
+            explicit_conv: false,
             va_dict_temps: Vec::new(),
             unsafe_depth: 0,
             guard_stack: Vec::new(),
@@ -2970,7 +2975,18 @@ impl<'m> Lowerer {
             let ret_val = if ir_ret == Type::Void || is_sret {
                 None
             } else if let Some((last_vid, last_ty)) = fc.last_init_local.clone() {
-                // sic implicit return: last initialized local variable
+                // sic implicit return: last initialized local variable. A float
+                // or `fixed` one does not become an integer result implicitly.
+                if fc.is_sic() && matches!(ir_ret, Type::Int { .. } | Type::Bool)
+                    && (last_ty.is_float() || super::types::is_fixed(&last_ty))
+                {
+                    let (file, line, col) = body.last().map(stmt_loc).unwrap_or((None, 0, 0));
+                    let what = if last_ty.is_float() { type_desc(&last_ty) } else { "fixed".to_string() };
+                    return Err(CompileError::at(format!(
+                        "`{}` ends without a `return`, so it returns its last local, a `{}`, which does not \
+                         convert to `{}` implicitly — add a `return` (cast the value to return it)",
+                        name, what, type_desc(&ir_ret)), file, line, col));
+                }
                 let load_dest = fc.alloc_val();
                 fc.push_instr(Instr::Load { dest: load_dest, ptr: Val::Local(last_vid), ty: last_ty });
                 let coerced = fc.coerce(Val::Local(load_dest), &ir_ret)?;
@@ -7071,6 +7087,20 @@ impl<'m> FuncCtx<'m> {
         match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
             _ => {}
+        }
+
+        // sic (sic.md §"Limit undefined behavior"): a float or a `fixed` never
+        // becomes an integer (or a `bool`) implicitly — it would lose its
+        // fraction (and an out-of-range float is undefined in C). Only a cast
+        // truncates: `(int)d`.
+        if self.is_sic() && !self.explicit_conv && matches!(target, Type::Int { .. } | Type::Bool)
+            && (src_ty.is_float() || super::types::is_fixed(&src_ty))
+        {
+            let what = if src_ty.is_float() { type_desc(&src_ty) } else { "fixed".to_string() };
+            let to = type_desc(target);
+            return Err(CompileError::new(format!(
+                "a `{}` value does not convert to `{}` implicitly — cast it (`({}) x`) to drop the fraction",
+                what, to, to)));
         }
 
         // sic `u8char` from an integer (a code point or char literal) wherever a

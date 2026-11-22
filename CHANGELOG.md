@@ -134,6 +134,13 @@
   key reads as `None`.
 - An async function takes a plain `tuple` parameter, static or dynamic as
   its calls give it (it was a compile error).
+- A float or `fixed` value never converts to an integer or `bool` implicitly
+  (initialization, assignment, `return`, arguments, container stores, globals):
+  a cast does it. An `any` holding a float read as an integer without a cast
+  stops the program. Fixed along the way: a number stored into a numeric
+  container element kept its bits (`3` in a `list<double>` read 1.5e-323);
+  `fixed y = -1.5;` and `fixed z = d;` truncated to an integer, and `-v` of a
+  `fixed` negated its pointer — all now exact.
 - An `any` holds its value: a string's descriptor or a struct of up to 24
   bytes in itself (it is 32 bytes, was 16), a bigger struct as its own copy,
   a number or handle as itself; one a variable, field or container keeps owns

@@ -1,0 +1,37 @@
+// A float or `fixed` value becomes an integer only by a cast; what converts
+// implicitly converts exactly. A number stored into a numeric container
+// element converts to the element's type (its bits were stored as they were:
+// `3` in a `list<double>` read back as 1.5e-323); a negative decimal
+// literal, a negated `fixed` and a `double` become `fixed` exactly (they were
+// truncated to an integer, or the rational's pointer was negated). Returns 42.
+int main() {
+    int r = 0;
+    double d = 2.75;
+    int t = (int)d;
+    long w = (long)(d * 4);
+    if (t == 2 && w == 11) r += 1;
+    list<double> ld;
+    ld.add(3);
+    dict<int, double> m;
+    m[1] = 2;
+    list<long> ll;
+    int i = 7;
+    ll.add(i);
+    if (ld[0] == 3.0 && m[1] == 2.0 && ll[0] == 7) r += 1;
+    fixed<10,2> a = -1.5;
+    fixed<10,2> b = 2.25;
+    fixed<10,2> nb = -b;
+    fixed<10,2> want = -0.75;
+    if (a + 0 < 0 && nb + 1.5 == want) r += 1;
+    double q = 0.375;
+    fixed z = q;
+    fixed<10,3> want2 = 0.375;
+    if (z == want2) r += 1;
+    any boxed = 3.5;
+    int bi = (int)boxed;
+    any n = 4;
+    int ni = n;
+    double nd = n;
+    if (bi == 3 && ni == 4 && nd == 4.0) r += 1;
+    return r == 5 ? 42 : r;
+}
