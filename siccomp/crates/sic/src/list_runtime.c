@@ -3,6 +3,19 @@ extern void *realloc(void *, unsigned long);
 extern void free(void *);
 extern void *memcpy(void *, const void *, unsigned long);
 
+/* A type-info record (sic.md §"RTTI"): `clone` makes a byte copy of a value
+   independent (null when the bytes are the whole value); `share`, `retain`
+   and `release` own a copy of the value as the compiler does (`share` before
+   copying a counted struct, `retain` the copy, `release` it), null when the
+   type owns nothing. */
+typedef struct __sic_elem_tinfo {
+    const char *name; unsigned long id; unsigned int size; unsigned int kind;
+    void (*clone)(void *);
+    void (*share)(void *);
+    void (*retain)(void *);
+    void (*release)(void *);
+} __sic_elem_tinfo;
+
 /* Forward references for container-element release (a `list`/`dict`/`set` stored
    inside a container is refcounted). `__sic_dict_free` lives in the dict runtime,
    which is co-prepended whenever a dict is used; the weak reference resolves to 0
@@ -56,9 +69,11 @@ __attribute__((weak)) void __sic_str_rc_release(unsigned long *rc) {
          reader that copied the descriptor and retained keeps it alive);
      3/4 = a nested list / dict handle, 5/6 = a weak one, 7 = a tuple;
      8 = a deep-copied managed struct: its destructor runs before the free;
-     9 = a `bigint`, 10 = a `fixed`: the element's own copy.
+     9 = a `bigint`, 10 = a `fixed`: the element's own copy;
+     12 = a value an `any` held, as its type info owns it (`vty`): a word (a
+          handle, a number) released through it.
    A borrowed value (vowned 0) is left alone. */
-__attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
+__attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned, unsigned long vty) {
     if (vowned == 1) {
         free((void *)vslot);
     } else if (vowned == 2) {
@@ -90,6 +105,38 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
         if (__sic_bi_free) __sic_bi_free((struct __sic_bi *)vslot);
     } else if (vowned == 10) {
         if (__sic_rat_free) __sic_rat_free((struct __sic_rat *)vslot);
+    } else if (vowned == 12) {
+        const __sic_elem_tinfo *ti = (const __sic_elem_tinfo *)vty;
+        if (ti && ti->release) ti->release(&vslot);
+    }
+}
+
+/* A container element from an `any` value (`l.add(a)`, `d[k] = a` with `a`
+   an `any`): the element's type is the value's, and the element owns its own
+   copy — an aggregate in a block of its own, freed through its type's
+   `release` (vowned 8), anything else a word retained through its type
+   (vowned 12), or nothing to own (0). `a` is `{ ty; value[24] }`, holding an
+   aggregate of up to 24 bytes in its words, a bigger one by address. */
+__attribute__((weak)) void __sic_any_to_elem(const unsigned long *a, unsigned long *oslot, int *oowned) {
+    const __sic_elem_tinfo *ti = (const __sic_elem_tinfo *)a[0];
+    *oslot = a[1];
+    *oowned = 0;
+    if (!ti) return;
+    unsigned int k = ti->kind;
+    if (k == 9 || k == 11 || k == 12 || k == 13) {
+        const void *src = ti->size <= 24 ? (const void *)&a[1] : (const void *)a[1];
+        void **hdr = (void **)malloc(2 * sizeof(void *) + (ti->size ? ti->size : 1));
+        hdr[0] = (void *)ti->release;
+        hdr[1] = 0;
+        memcpy(hdr + 2, src, ti->size);
+        if (ti->retain) ti->retain(hdr + 2);
+        *oslot = (unsigned long)(hdr + 2);
+        *oowned = 8;
+        return;
+    }
+    if (ti->retain) {
+        ti->retain(oslot);
+        *oowned = 12;
     }
 }
 
@@ -110,6 +157,7 @@ typedef struct __sic_list {
        stays until the list goes, as for one read with `l[i]`. */
     unsigned long *retired;
     int *retired_owned;
+    unsigned long *retired_ty;
     unsigned long nretired;
 } __sic_list;
 
@@ -121,6 +169,7 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
     l->wrc = 1;   /* the strong owners' one weak reference */
     l->retired = 0;
     l->retired_owned = 0;
+    l->retired_ty = 0;
     l->nretired = 0;
     l->vty = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vslot = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
@@ -174,7 +223,7 @@ __attribute__((weak)) int __sic_list_get(__sic_list *l, unsigned long i, unsigne
 
 __attribute__((weak)) void __sic_list_set(__sic_list *l, unsigned long i, unsigned long vty, unsigned long vslot, int vowned) {
     if (!l || i >= l->len) return;
-    __sic_box_free(l->vslot[i], l->vowned[i]);    /* reclaim the replaced element */
+    __sic_box_free(l->vslot[i], l->vowned[i], l->vty[i]);    /* reclaim the replaced element */
     l->vty[i] = vty;
     l->vslot[i] = vslot;
     l->vowned[i] = vowned;
@@ -186,7 +235,7 @@ __attribute__((weak)) unsigned long __sic_list_len(__sic_list *l) { return l ? l
 __attribute__((weak)) void __sic_list_drop_last(__sic_list *l) {
     if (!l || l->len == 0) return;
     l->len--;
-    __sic_box_free(l->vslot[l->len], l->vowned[l->len]);
+    __sic_box_free(l->vslot[l->len], l->vowned[l->len], l->vty[l->len]);
 }
 
 /* `.values` (sic.md §"Iterators"): a fresh list with each element BORROWED
@@ -212,12 +261,13 @@ __attribute__((weak)) __sic_list *__sic_list_keys(__sic_list *l) {
 __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     if (!l || __atomic_load_n(&l->rc, __ATOMIC_SEQ_CST) == 0 || __atomic_sub_fetch(&l->rc, 1, __ATOMIC_SEQ_CST) != 0) return;
     for (unsigned long i = 0; i < l->len; i++)
-        __sic_box_free(l->vslot[i], l->vowned[i]);
+        __sic_box_free(l->vslot[i], l->vowned[i], l->vty[i]);
     for (unsigned long i = 0; i < l->nretired; i++)
-        __sic_box_free(l->retired[i], l->retired_owned[i]);
+        __sic_box_free(l->retired[i], l->retired_owned[i], l->retired_ty[i]);
     free(l->retired);
     free(l->retired_owned);
-    l->retired = 0; l->retired_owned = 0; l->nretired = 0;
+    free(l->retired_ty);
+    l->retired = 0; l->retired_owned = 0; l->retired_ty = 0; l->nretired = 0;
     free(l->vty);
     free(l->vslot);
     free(l->vowned);
@@ -229,13 +279,7 @@ __attribute__((weak)) void __sic_list_free(__sic_list *l) {
    An independent copy of a container: every element is copied by its type, so
    nothing is shared with the original. The type comes from the element's own
    type-info (`vty`, an `any` element) or else the container's element type
-   `ti`, which the compiler passes. A type-info is `{ name; id; size; kind;
-   clone }`: `clone` makes a byte copy of a value independent (null when the
-   bytes are the whole value). */
-typedef struct __sic_elem_tinfo {
-    const char *name; unsigned long id; unsigned int size; unsigned int kind;
-    void (*clone)(void *);
-} __sic_elem_tinfo;
+   `ti`, which the compiler passes (`__sic_elem_tinfo`, at the top). */
 struct __sic_dict;
 extern __attribute__((weak)) struct __sic_dict *__sic_dict_clone(struct __sic_dict *, const __sic_elem_tinfo *);
 extern __attribute__((weak)) void __sic_dict_weak_retain(struct __sic_dict *);
@@ -269,6 +313,7 @@ __attribute__((weak)) unsigned long __sic_str_box_clone(unsigned long vslot) {
 __attribute__((weak)) unsigned long __sic_box_clone(unsigned long vslot, int vowned, const __sic_elem_tinfo *ti) {
     if (vowned == 2) return __sic_str_box_clone(vslot);
     if (vowned == 5) { __sic_list_weak_retain((__sic_list *)vslot); return vslot; }
+    if (vowned == 12) { if (ti && ti->retain) ti->retain(&vslot); return vslot; }
     if (vowned == 9 && __sic_bi_clone) return (unsigned long)__sic_bi_clone((const struct __sic_bi *)vslot);
     if (vowned == 10 && __sic_rat_clone) return (unsigned long)__sic_rat_clone((const struct __sic_rat *)vslot);
     if (vowned == 6) { __sic_dict_weak_retain((struct __sic_dict *)vslot); return vslot; }
@@ -306,8 +351,10 @@ __attribute__((weak)) void __sic_list_retire_last(__sic_list *l) {
     l->len--;
     l->retired = (unsigned long *)realloc(l->retired, (l->nretired + 1) * sizeof(unsigned long));
     l->retired_owned = (int *)realloc(l->retired_owned, (l->nretired + 1) * sizeof(int));
+    l->retired_ty = (unsigned long *)realloc(l->retired_ty, (l->nretired + 1) * sizeof(unsigned long));
     l->retired[l->nretired] = l->vslot[l->len];
     l->retired_owned[l->nretired] = l->vowned[l->len];
+    l->retired_ty[l->nretired] = l->vty[l->len];
     l->nretired++;
 }
 

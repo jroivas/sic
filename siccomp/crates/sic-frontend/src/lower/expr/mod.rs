@@ -136,9 +136,9 @@ impl<'m> FuncCtx<'m> {
     /// Emit (once per canonical name) a static `__sic_type_info` record and return
     /// a `type` value pointing at it (sic.md §"RTTI"). `name` is the canonical
     /// spelling (`type_name_of`); `kind`/`size` classify the type for formatters.
-    pub(crate) fn emit_type_info(&mut self, name: &str, kind: u32, size: u32, clone: Option<FuncRef>) -> Val {
+    pub(crate) fn emit_type_info(&mut self, name: &str, kind: u32, size: u32, fns: super::func::TypeFns) -> Val {
         use super::types as t;
-        let gref = self.lowerer.type_info_global(name, kind, size, clone);
+        let gref = self.lowerer.type_info_global(name, kind, size, fns);
         let ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr {
             dest: ptr, base: Val::Global(gref), index: Constant::zero(),
@@ -198,8 +198,8 @@ impl<'m> FuncCtx<'m> {
         let name = self.type_name_of(ty);
         let kind = super::types::type_kind(ty);
         let size = ty.size_of(self.ptr_size()) as u32;
-        let clone = self.lowerer.ensure_clone_fn(ty).ok().flatten();
-        self.emit_type_info(&name, kind, size, clone)
+        let fns = self.lowerer.type_fns(ty);
+        self.emit_type_info(&name, kind, size, fns)
     }
 
     /// Box a value into an `any` (sic.md std): `{ ty = typeid(static type); slot =
@@ -212,7 +212,6 @@ impl<'m> FuncCtx<'m> {
         if super::types::is_any(&ty) { return self.lower_expr(e); }
         let sp = e.span.clone();
         let tyval = self.lower_type_value(&ty);
-        let slot = self.box_slot(e, &ty)?;
         let any_ty = super::types::any_type();
         let p = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: p, ty: any_ty.clone(), align: None });
@@ -220,7 +219,27 @@ impl<'m> FuncCtx<'m> {
         let ty_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "ty", false, &sp)?;
         self.store_lvalue(&ty_lv, tyval)?;
         let slot_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "slot", false, &sp)?;
-        self.store_lvalue(&slot_lv, slot)?;
+        let ps = self.ptr_size();
+        if super::types::any_holds_inline(&ty, ps) {
+            // A small aggregate (a `string`'s descriptor) is held in the words: a
+            // copy, which borrows what it owns until the `any` is kept (retained).
+            let src = self.lower_aggregate_ptr(e)?;
+            self.share_counted_at(&src, &ty)?;
+            self.push_instr(Instr::MemCopy { dst: slot_lv.ptr, src, size: ty.size_of(ps), align: 8 });
+        } else {
+            // A bigger aggregate by its address (the `any` makes its own copy
+            // when kept); a scalar, pointer or handle as it is.
+            if super::types::any_aggregate_kind(super::types::type_kind(&ty)) {
+                let src = self.lower_aggregate_ptr(e)?;
+                self.share_counted_at(&src, &ty)?;
+                let w = self.alloc_val();
+                self.push_instr(Instr::Cast { dest: w, op: CastOp::PtrToInt, val: src, to_ty: Type::u64() });
+                self.store_lvalue(&slot_lv, Val::Local(w))?;
+            } else {
+                let slot = self.box_slot(e, &ty)?;
+                self.store_lvalue(&slot_lv, slot)?;
+            }
+        }
         Ok(Val::Local(p))
     }
 
@@ -430,6 +449,14 @@ impl<'m> FuncCtx<'m> {
                 return self.coerce(Val::Local(n), target);
             }
         }
+        // A small aggregate is held in the `any`'s words: its address there.
+        if super::types::any_holds_inline(target, self.ptr_size()) {
+            let slot_lv = self.field_ptr_from(LValue::plain(any_ptr, any_ty), "slot", false, &sp)?;
+            let d = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: d, op: CastOp::BitCast, val: slot_lv.ptr, to_ty: Type::void_ptr() });
+            self.val_types.insert(d.0, target.clone());
+            return Ok(Val::Local(d));
+        }
         self.reinterpret_slot(slot, target)
     }
 
@@ -579,8 +606,8 @@ impl<'m> FuncCtx<'m> {
                 let name = self.type_name_string(inner, &ty);
                 let kind = super::types::type_kind(&ty);
                 let size = ty.size_of(self.ptr_size()) as u32;
-                let clone = self.lowerer.ensure_clone_fn(&ty).ok().flatten();
-                Ok(self.emit_type_info(&name, kind, size, clone))
+                let fns = self.lowerer.type_fns(&ty);
+                Ok(self.emit_type_info(&name, kind, size, fns))
             }
             ExprKind::TypeIdOf(qty) => {
                 let ty = self.lower_type(qty)?;
@@ -2149,6 +2176,7 @@ impl<'m> FuncCtx<'m> {
             "__sic_list_free" | "__sic_list_retain" | "__sic_list_take_last"
             | "__sic_list_weak_retain" | "__sic_list_weak_release" => (vec![ptr.clone()], Type::Void),
             "__sic_list_upgrade" => (vec![ptr.clone()], ptr),
+            "__sic_any_to_elem" => (vec![ptr.clone(), ptr.clone(), ptr.clone()], Type::Void),
             // `.keys`/`.values` (sic.md §"Iterators"): list → fresh `list` handle.
             "__sic_list_values" | "__sic_list_keys" => (vec![ptr.clone()], ptr),
             _ => (vec![], Type::Void),
@@ -2497,6 +2525,31 @@ impl<'m> FuncCtx<'m> {
             let vowned = Constant::int(if is_dict { 6 } else { 5 });
             return Ok((Constant::uint(0), Val::Local(w), vowned));
         }
+        // An `any` element (`list<any>`, `dict<K, any>`): the element owns a copy
+        // of the value, made by the value's type (`__sic_any_to_elem`) — an
+        // aggregate was stored by its address, borrowed from the source. A
+        // `string` keeps its owned string block below.
+        if self.is_sic() && super::types::is_any(v) && !super::types::is_sic_string(&ety) {
+            let a = self.box_any(val)?;
+            let oslot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: oslot, ty: Type::u64(), align: None });
+            let oowned = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: oowned, ty: Type::i32(), align: None });
+            let f = self.list_runtime_fn("__sic_any_to_elem");
+            let ap = self.any_addr(a.clone());
+            self.push_instr(Instr::Call { dest: None, func: f, args: vec![ap, Val::Local(oslot), Val::Local(oowned)], ret_ty: Type::Void });
+            let any_ty = super::types::any_type();
+            let tlv = self.field_ptr_from(LValue::plain(a, any_ty), "ty", false, &val.span)?;
+            let t = self.load_lvalue(&tlv)?;
+            let tw = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: tw, op: CastOp::PtrToInt, val: t, to_ty: Type::u64() });
+            let w = self.alloc_val();
+            self.push_instr(Instr::Load { dest: w, ptr: Val::Local(oslot), ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            let o = self.alloc_val();
+            self.push_instr(Instr::Load { dest: o, ptr: Val::Local(oowned), ty: Type::i32() });
+            return Ok((Val::Local(tw), Val::Local(w), Val::Local(o)));
+        }
         // A tuple element (`list<tuple>`, `dict<K,tuple>`): the outer container owns a
         // reference to the shared tuple block — retain it and mark it for release
         // (`vowned` 7) when the outer is freed/overwritten, so the tuple (and the
@@ -2657,6 +2710,8 @@ impl<'m> FuncCtx<'m> {
             self.store_lvalue(&ty_lv, Val::Local(typ))?;
             let slot_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty), "slot", false, sp)?;
             self.store_lvalue(&slot_lv, Val::Local(slot))?;
+            // The container keeps an aggregate by address: held in the words.
+            self.any_from_word_at(Val::Local(p))?;
             return Ok(Val::Local(p));
         }
         let val = self.reinterpret_slot(Val::Local(slot), v)?;
@@ -2944,9 +2999,9 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn tuple_shape(&mut self, layout: &Type) -> Val {
         let fields = match layout { Type::Struct(st) => st.fields.clone(), _ => vec![] };
         let (offs, _, _) = match layout { Type::Struct(st) => st.layout_full(self.ptr_size()), _ => (vec![], vec![], 0) };
-        let elems: Vec<(String, u32, u32, u64, Option<FuncRef>)> = fields.iter().enumerate().map(|(i, (_, t))| {
+        let elems: Vec<(String, u32, u32, u64, super::func::TypeFns)> = fields.iter().enumerate().map(|(i, (_, t))| {
             (self.type_name_of(t), super::types::type_kind(t), t.size_of(self.ptr_size()) as u32, offs.get(i).copied().unwrap_or(0),
-             self.lowerer.ensure_clone_fn(t).ok().flatten())
+             self.lowerer.type_fns(t))
         }).collect();
         let g = self.lowerer.tuple_shape_global(&elems);
         let ptr = self.alloc_val();
@@ -3129,6 +3184,8 @@ impl<'m> FuncCtx<'m> {
             let typ = self.coerce(tyf.ptr, &Type::void_ptr())?;
             let slp = self.coerce(slotf.ptr, &Type::void_ptr())?;
             self.push_instr(Instr::Call { dest: None, func: f, args: vec![data, iv.clone(), typ, slp], ret_ty: Type::Void });
+            // The element's address for an aggregate: held in the words.
+            self.any_from_word_at(Val::Local(tmp))?;
             self.strict_anys.insert(tmp.0, iv);
             return Ok(LValue::plain(Val::Local(tmp), any_ty));
         }
@@ -5044,7 +5101,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Emit `memcpy(dst, src, n)`.
-    fn emit_memcpy(&mut self, dst: Val, src: Val, n: Val) -> Result<()> {
+    pub(crate) fn emit_memcpy(&mut self, dst: Val, src: Val, n: Val) -> Result<()> {
         let voidp = Type::void_ptr();
         let fref = self.lowerer.module.func_ref_by_name("memcpy").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
@@ -5208,22 +5265,33 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    /// Retain (`retain=true`) or release the `string` an `any` at `addr` wraps
-    /// (sic.md §"Iterators"/std): loads `{ ty, slot }` and calls
-    /// `__sic_any_{retain,release}` (a no-op unless the runtime type is a string).
-    /// Lets an `any` local that read a refcounted container string share ownership.
+    /// Retain (`retain=true`) or release the value an `any` at `addr` holds
+    /// (sic.md std), by its runtime type (`__sic_any_{retain,release}`): a copy
+    /// of an `any` that a variable, field or container keeps owns its value.
     pub(crate) fn any_refcount_at(&mut self, addr: Val, retain: bool) -> Result<()> {
-        let any_ty = super::types::any_type();
-        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
-        let ty_lv = self.field_ptr_from(LValue::plain(addr.clone(), any_ty.clone()), "ty", false, &crate::lexer::Span::default())?;
-        let tyv = self.load_lvalue(&ty_lv)?;
-        let tyv = self.coerce(tyv, &Type::void_ptr())?;
-        let slot_lv = self.field_ptr_from(LValue::plain(addr, any_ty), "slot", false, &crate::lexer::Span::default())?;
-        let slotv = self.load_lvalue(&slot_lv)?;
-        let slotv = self.coerce(slotv, &usize_ty)?;
         let fref = if retain { self.lowerer.ensure_any_retain_fn() } else { self.lowerer.ensure_any_release_fn() };
-        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![tyv, slotv], ret_ty: Type::Void });
+        let a = self.any_addr(addr);
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![a], ret_ty: Type::Void });
         Ok(())
+    }
+
+    /// `any` at `addr` whose `slot` holds a value as a container or tuple
+    /// stores it (an aggregate by address): made into the form an `any` holds
+    /// it in (`Lowerer::ensure_any_from_word_fn`).
+    pub(crate) fn any_from_word_at(&mut self, addr: Val) -> Result<()> {
+        let fref = self.lowerer.ensure_any_from_word_fn();
+        let a = self.any_addr(addr);
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![a], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// The address of the `any` at `addr`, as a `void*` (a `coerce` would
+    /// convert the `any` to its value).
+    pub(crate) fn any_addr(&mut self, addr: Val) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: d, op: CastOp::BitCast, val: addr, to_ty: Type::void_ptr() });
+        self.val_types.insert(d.0, Type::void_ptr());
+        Val::Local(d)
     }
 
     /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,

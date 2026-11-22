@@ -1,0 +1,75 @@
+// An `any` holds its value: a string's descriptor or a small struct in its
+// words, a bigger struct as its own copy, a number or handle as itself, and
+// a kept `any` owns what the value owns. It held an aggregate by its address,
+// so an `any` outliving the value it was made from — returned, stored in a
+// field or a container, an async result — pointed at a dead frame, and
+// `return 7;` from an `any` function crashed. Returns 42.
+import std::*;
+
+int dtors = 0;
+struct R { string s; ~R() { dtors++; } };
+struct Big { string a; string b; long c; long d; };
+struct H { any v; };
+
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+any seven() { return 7; }
+any word(int i) { any a = "w" + num(i); return a; }
+any pick(int c) { any a; if (c) a = "p" + num(c); else a = 9; return a; }
+any big() { Big g; g.a = "a" + num(1); g.b = "b" + num(2); g.c = 3; g.d = 4; any x = g; return x; }
+async any later(int c) { return pick(c); }
+
+int main() {
+    int r = 0;
+    int s7 = seven();
+    string w = word(3);
+    if (s7 == 7 && w == "w3") r += 1;
+    string p1 = pick(1);
+    int p0 = pick(0);
+    if (p1 == "p1" && p0 == 9) r += 1;
+    {
+        any a;
+        R x; x.s = "r" + num(5);
+        a = x;
+        any b = a;
+        R y = b;
+        if (y.s == "r5") r += 1;
+    }
+    if (dtors == 1) r += 1;
+    any g = big();
+    any g2 = g;
+    Big bg = g2;
+    if (bg.a == "a1" && bg.b == "b2" && bg.d == 4) r += 1;
+    list<any> l;
+    l.add(1);
+    l.add("l" + num(2));
+    { any t = "t" + num(4); l.add(t); }
+    string l1 = l[1];
+    string l2 = l[2];
+    int l0 = l[0];
+    if (l.length == 3 && l0 == 1 && l1 == "l2" && l2 == "t4") r += 1;
+    dict<string, any> d;
+    d["k"] = "v" + num(6);
+    any held = d["k"];
+    d["k"] = 2;
+    string hs = held;
+    if (hs == "v6") r += 1;
+    H h; h.v = "h" + num(7);
+    H k = h;
+    string ks = k.v;
+    if (ks == "h7") r += 1;
+    any c = word(8).clone();
+    string cs = c;
+    if (cs == "w8") r += 1;
+    bigint bi = 123456789012345678901234567890;
+    any ab = bi;
+    any ab2 = ab;
+    bigint back = ab2;
+    if (back == bi) r += 1;
+    any la = await later(2);
+    any lb = await later(0);
+    string las = la;
+    int lbs = lb;
+    if (las == "p2" && lbs == 9) r += 1;
+    return r == 11 ? 42 : r;
+}

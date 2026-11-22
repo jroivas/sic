@@ -142,6 +142,12 @@ impl<'m> FuncCtx<'m> {
         if matches!(self.infer_expr_type(e), Ok(t) if super::super::types::is_bigint(&t)) {
             return self.lower_expr(e);
         }
+        // An `any` holding one: its value, borrowed (it was taken for an integer,
+        // its pointer read as the number).
+        if self.is_sic() && matches!(self.infer_expr_type(e), Ok(t) if super::super::types::is_any(&t)) {
+            let a = self.lower_aggregate_ptr(e)?;
+            return self.unbox_any_val(a, &super::super::types::bigint_type());
+        }
         // An integer expression → widen to a temporary bigint.
         let unsigned_64 = matches!(self.infer_expr_type(e), Ok(Type::Int { bits: 64, signed: false }));
         let v = self.lower_expr(e)?;

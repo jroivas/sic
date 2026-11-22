@@ -1950,72 +1950,142 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
-    /// Synthesize `void __sic_any_{retain,release}(void* ty, u64 slot)` — refcount
-    /// the string an `any` wraps (sic.md std / §"Built-in string"). An `any` is
-    /// `{ ty, slot }`; when its runtime `type` is a `string` (RTTI kind 9), `slot`
-    /// is a string descriptor and its `rc` field (offset 16) is the block's refcount
-    /// cell — so `retain`/`release` forward to `__sic_str_{retain,release}`. For any
-    /// other kind (or a null `ty`) it is a no-op. This lets an `any` local that read
-    /// a refcounted container string share ownership of it (retain on bind, release
-    /// at scope exit), so a later container overwrite/remove doesn't dangle it.
+    /// `void __sic_any_{retain,release}(any *a)`: own, or stop owning, the value
+    /// an `any` holds (sic.md std), by its type info. A value held in the
+    /// `any`'s words (a scalar, a handle, an aggregate of up to `ANY_INLINE`
+    /// bytes) is retained / released in place by the type's functions; a bigger
+    /// aggregate is the `any`'s own heap copy, made from the one `slot` points
+    /// at when retained, freed when released. A null `ty` holds nothing.
     pub(crate) fn ensure_any_release_fn(&mut self) -> FuncRef {
-        self.ensure_any_refcount_fn("__sic_any_release", false)
+        self.ensure_any_op_fn("__sic_any_release", AnyOp::Release)
     }
     pub(crate) fn ensure_any_retain_fn(&mut self) -> FuncRef {
-        self.ensure_any_refcount_fn("__sic_any_retain", true)
+        self.ensure_any_op_fn("__sic_any_retain", AnyOp::Retain)
     }
-    fn ensure_any_refcount_fn(&mut self, name: &str, retain: bool) -> FuncRef {
-        if let Some(f) = self.module.func_ref_by_name(name) {
-            return f;
-        }
-        let inner = if retain { self.ensure_str_retain_fn() } else { self.ensure_str_release_fn() };
-        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
-        let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+    /// `void __sic_any_from_word(any *a)`: an `any` whose `slot` was filled as
+    /// a container or tuple stores a value — an aggregate's address — made into
+    /// one that holds an aggregate of up to `ANY_INLINE` bytes in its words. The
+    /// aggregate's counted structs get their counts first (`share`), so a copy
+    /// made from the `any` shares them.
+    pub(crate) fn ensure_any_from_word_fn(&mut self) -> FuncRef {
+        self.ensure_any_op_fn("__sic_any_from_word", AnyOp::FromWord)
+    }
+
+    /// `void __sic_any_clone(any *a)`: an `any` just copied from another made
+    /// independent of it (sic.md §"Copying: clone"): its value cloned by its
+    /// type, a bigger aggregate into a heap copy of its own.
+    pub(crate) fn ensure_any_clone_at_fn(&mut self) -> FuncRef {
+        self.ensure_any_op_fn("__sic_any_clone", AnyOp::Clone)
+    }
+
+    fn ensure_any_op_fn(&mut self, name: &str, op: AnyOp) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name(name) { return f; }
         let voidp = Type::void_ptr();
         let u32_ty = Type::Int { bits: 32, signed: false };
-        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone(), usize_ty.clone()], variadic: false };
-        let params = vec![
-            sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
-            sic_ir::Param { name: "slot".to_string(), ty: usize_ty.clone() },
-        ];
+        let u64_ty = Type::u64();
+        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+        let params = vec![sic_ir::Param { name: "a".to_string(), ty: voidp.clone() }];
         let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
         {
             let mut fc = func::FuncCtx::new_with_func(self, &mut func);
-            // Params: ty = %0x10000, slot = %0x10001 (arg ValIds).
-            let ty_arg = Val::Local(ValId(0x10000));
-            let slot_arg = Val::Local(ValId(0x10001));
-            let kindok_bb = fc.new_block_after_current();
-            let body_bb = fc.new_block_after_current();
-            let done_bb = fc.new_block_after_current();
-            // if (ty == NULL) goto done;
-            let ty_i = fc.alloc_val();
-            fc.push_instr(Instr::Cast { dest: ty_i, op: CastOp::BitCast, val: ty_arg.clone(), to_ty: usize_ty.clone() });
-            let is_null = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(ty_i), rhs: Constant::int(0), ty: usize_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: kindok_bb });
-            // kindok: k = *(u32*)(ty + 20); if (k != 9) goto done;
-            fc.switch_to_block(kindok_bb);
-            let kindp = fc.alloc_val();
-            fc.push_instr(Instr::GetElemPtr { dest: kindp, base: ty_arg, index: Constant::int(types::TYPEINFO_OFF_KIND as i64), elem_size: 1, result_ty: Type::Pointer(Box::new(u32_ty.clone())) });
-            let k = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: k, ptr: Val::Local(kindp), ty: u32_ty.clone() });
-            let is_str = fc.alloc_val();
-            let str_kind = types::type_kind(&types::sic_string_type(fc.ptr_size())) as i64;
-            fc.push_instr(Instr::Cmp { dest: is_str, op: CmpOp::IEq, lhs: Val::Local(k), rhs: Constant::int(str_kind), ty: u32_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_str), then_bb: body_bb, else_bb: done_bb });
-            // body: rc = *(usize*)(slot + 16); __sic_str_{retain,release}(rc);
-            fc.switch_to_block(body_bb);
+            let anyp = Val::Local(ValId(0x10000));
+            let load_at = |fc: &mut func::FuncCtx, base: Val, off: i64, ty: &Type| -> Val {
+                let p = fc.alloc_val();
+                fc.push_instr(Instr::GetElemPtr { dest: p, base, index: Constant::int(off), elem_size: 1, result_ty: Type::Pointer(Box::new(ty.clone())) });
+                let v = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(p), ty: ty.clone() });
+                Val::Local(v)
+            };
+            let is = |fc: &mut func::FuncCtx, op: CmpOp, a: Val, b: Val, ty: &Type| -> Val {
+                let d = fc.alloc_val();
+                fc.push_instr(Instr::Cmp { dest: d, op, lhs: a, rhs: b, ty: ty.clone() });
+                Val::Local(d)
+            };
+            let done = fc.new_block_after_current();
+            let ty = load_at(&mut fc, anyp.clone(), 0, &voidp);
+            let null = is(&mut fc, CmpOp::IEq, ty.clone(), Val::Const(Constant::Null), &voidp);
+            let go = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: null, then_bb: done, else_bb: go });
+            fc.switch_to_block(go);
+            let size = load_at(&mut fc, ty.clone(), types::TYPEINFO_OFF_SIZE as i64, &u32_ty);
+            let kind = load_at(&mut fc, ty.clone(), types::TYPEINFO_OFF_KIND as i64, &u32_ty);
+            let off = match op {
+                AnyOp::Retain => types::TYPEINFO_OFF_RETAIN,
+                AnyOp::Release => types::TYPEINFO_OFF_RELEASE,
+                AnyOp::FromWord => types::TYPEINFO_OFF_SHARE,
+                AnyOp::Clone => types::TYPEINFO_OFF_CLONE,
+            } as i64;
+            let f = load_at(&mut fc, ty, off, &voidp);
             let slotp = fc.alloc_val();
-            fc.push_instr(Instr::Cast { dest: slotp, op: CastOp::BitCast, val: slot_arg, to_ty: voidp.clone() });
-            let rcfieldp = fc.alloc_val();
-            fc.push_instr(Instr::GetElemPtr { dest: rcfieldp, base: Val::Local(slotp), index: Constant::int(16), elem_size: 1, result_ty: Type::Pointer(Box::new(rcp.clone())) });
-            let rc = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rcfieldp), ty: rcp.clone() });
-            fc.push_instr(Instr::Call { dest: None, func: inner, args: vec![Val::Local(rc)], ret_ty: Type::Void });
-            fc.set_terminator(Terminator::Jump(done_bb));
-            fc.switch_to_block(done_bb);
+            fc.push_instr(Instr::GetElemPtr { dest: slotp, base: anyp, index: Constant::int(8), elem_size: 1, result_ty: Type::Pointer(Box::new(u64_ty.clone())) });
+            let slotp = Val::Local(slotp);
+            let slotw = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: slotw, ptr: slotp.clone(), ty: u64_ty.clone() });
+            let slotw_p = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: slotw_p, op: CastOp::IntToPtr, val: Val::Local(slotw), to_ty: voidp.clone() });
+            let slotw_p = Val::Local(slotw_p);
+            let fnty = Box::new(FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false });
+            // `f(p)` when the type has the function.
+            let call_f = |fc: &mut func::FuncCtx, p: Val| {
+                let has = is(fc, CmpOp::INe, f.clone(), Val::Const(Constant::Null), &voidp);
+                let skip = fc.branch_if(has);
+                fc.push_instr(Instr::CallIndirect { dest: None, fptr: f.clone(), args: vec![p], ret_ty: Type::Void, func_ty: fnty.clone() });
+                fc.set_terminator(Terminator::Jump(skip));
+                fc.switch_to_block(skip);
+            };
+            // An aggregate kind: in the words when small, else by its address.
+            let mut agg = None;
+            for k in [9i64, 11, 12, 13] {
+                let e = is(&mut fc, CmpOp::IEq, kind.clone(), Constant::int(k), &u32_ty);
+                agg = Some(match agg {
+                    None => e,
+                    Some(a) => {
+                        let d = fc.alloc_val();
+                        fc.push_instr(Instr::BinOp { dest: d, op: BinOp::Or, lhs: a, rhs: e, ty: Type::Bool });
+                        Val::Local(d)
+                    }
+                });
+            }
+            let small = is(&mut fc, CmpOp::IULe, size.clone(), Constant::int(types::ANY_INLINE as i64), &u32_ty);
+            let size64 = fc.coerce(size, &u64_ty).unwrap_or(Constant::uint(0));
+            let scalar_bb = fc.branch_if(agg.unwrap());
+            // The value is an aggregate.
+            let big_bb = fc.branch_if(small);
+            match op {
+                AnyOp::Retain | AnyOp::Release | AnyOp::Clone => call_f(&mut fc, slotp.clone()),
+                AnyOp::FromWord => {
+                    call_f(&mut fc, slotw_p.clone());
+                    let _ = fc.emit_memcpy(slotp.clone(), slotw_p.clone(), size64.clone());
+                }
+            }
+            fc.set_terminator(Terminator::Jump(done));
+            fc.switch_to_block(big_bb);
+            match op {
+                AnyOp::Retain | AnyOp::Clone => {
+                    let p = fc.emit_malloc(size64.clone()).unwrap_or(Constant::null());
+                    let _ = fc.emit_memcpy(p.clone(), slotw_p.clone(), size64.clone());
+                    call_f(&mut fc, p.clone());
+                    let w = fc.alloc_val();
+                    fc.push_instr(Instr::Cast { dest: w, op: CastOp::PtrToInt, val: p, to_ty: u64_ty.clone() });
+                    fc.push_instr(Instr::Store { val: Val::Local(w), ptr: slotp.clone() });
+                }
+                AnyOp::Release => {
+                    call_f(&mut fc, slotw_p.clone());
+                    let _ = fc.emit_free(slotw_p.clone());
+                }
+                AnyOp::FromWord => call_f(&mut fc, slotw_p.clone()),
+            }
+            fc.set_terminator(Terminator::Jump(done));
+            // A scalar, pointer or handle: in `slot`.
+            fc.switch_to_block(scalar_bb);
+            match op {
+                AnyOp::Retain | AnyOp::Release | AnyOp::Clone => call_f(&mut fc, slotp.clone()),
+                AnyOp::FromWord => {}
+            }
+            fc.set_terminator(Terminator::Jump(done));
+            fc.switch_to_block(done);
             fc.set_terminator(Terminator::Ret(None));
         }
         self.module.add_function(func)
@@ -2073,9 +2143,10 @@ impl Lowerer {
 
     /// The RTTI record for a type (sic.md §"RTTI"), emitted once per name:
     /// `{ name*, id (hash of the name), size, kind }`.
-    pub(crate) fn type_info_global(&mut self, name: &str, kind: u32, size: u32, clone: Option<FuncRef>) -> GlobalRef {
+    pub(crate) fn type_info_global(&mut self, name: &str, kind: u32, size: u32, fns: func::TypeFns) -> GlobalRef {
         use types as t;
-        let key = match clone { Some(f) => format!("{}#{}", name, f.index()), None => name.to_string() };
+        let ix = |f: Option<FuncRef>| f.map_or(String::new(), |f| f.index().to_string());
+        let key = format!("{}#{}#{}#{}#{}", name, ix(fns.clone), ix(fns.share), ix(fns.retain), ix(fns.release));
         if let Some(&g) = self.type_info_globals.get(&key) { return g; }
         let mut nb = name.as_bytes().to_vec();
         nb.push(0);
@@ -2100,7 +2171,10 @@ impl Lowerer {
             init: Some(Constant::Aggregate {
                 bytes: b,
                 relocs: std::iter::once((t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0)))
-                    .chain(clone.map(|f| (t::TYPEINFO_OFF_CLONE, RelocTarget::Func(f)))).collect(),
+                    .chain([(t::TYPEINFO_OFF_CLONE, fns.clone), (t::TYPEINFO_OFF_SHARE, fns.share),
+                            (t::TYPEINFO_OFF_RETAIN, fns.retain), (t::TYPEINFO_OFF_RELEASE, fns.release)]
+                        .into_iter().filter_map(|(off, f)| f.map(|f| (off, RelocTarget::Func(f)))))
+                    .collect(),
             }),
             linkage: Linkage::Private, constant: true, thread_local: false, align: None,
         });
@@ -2112,15 +2186,15 @@ impl Lowerer {
     /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count] }`, read by the
     /// tuple runtime to check a dynamically typed tuple's elements, and by
     /// `__sic_tuple_clone` to copy each element by its type.
-    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64, Option<FuncRef>)]) -> GlobalRef {
+    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64, func::TypeFns)]) -> GlobalRef {
         let key = elems.iter().map(|(n, _, _, o, _)| format!("{}@{}", n, o)).collect::<Vec<_>>().join(",");
         if let Some(&g) = self.tuple_shape_globals.get(&key) { return g; }
         let ps = self.ptr_size as usize;
         let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8)];
         bytes[0..8].copy_from_slice(&(elems.len() as u64).to_le_bytes());
         let mut relocs = Vec::new();
-        for (i, (name, kind, size, off, clone)) in elems.iter().enumerate() {
-            let ti = self.type_info_global(name, *kind, *size, *clone);
+        for (i, (name, kind, size, off, fns)) in elems.iter().enumerate() {
+            let ti = self.type_info_global(name, *kind, *size, *fns);
             let at = 8 + i * (ps + 8);
             relocs.push((at, RelocTarget::Global(ti, 0)));
             bytes[at + ps..at + ps + 8].copy_from_slice(&off.to_le_bytes());
@@ -6334,3 +6408,7 @@ pub(crate) fn pointee_quals(qt: &QualType) -> Option<Vec<(bool, bool)>> {
         }
     }
 }
+
+/// The generic operations on an `any`'s value (`Lowerer::ensure_any_op_fn`).
+#[derive(Clone, Copy)]
+enum AnyOp { Retain, Release, FromWord, Clone }

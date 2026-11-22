@@ -570,9 +570,10 @@ heterogeneous list.
 
 `.pop()` moves the element out, so what it owns goes with it, and a struct's
 destructor runs once, for the new owner. On an empty list it gives a zero value,
-as any read past the end does, and the list stays empty. An `any` borrows what it
-holds, so a value popped from a `list<any>` stays valid as long as the list, like
-one read with `l[i]`. `.pop()` is not available on a list of tuples.
+as any read past the end does, and the list stays empty. An `any` owns the value it
+holds (a string's descriptor or a small struct in itself, a bigger struct as its own
+copy), so a value popped from a `list<any>` outlives the list, like any other copy.
+`.pop()` is not available on a list of tuples.
 
 Elements are owned by the list — string and struct elements are copied and freed
 with the list (and reclaimed when overwritten via `l[i] = …`). `l[i].field` and
@@ -665,9 +666,9 @@ each other in a cycle stop the program with a message.
   not a corruption.
 - Each thread has its own scheduler; a task stays on its thread.
 - `await` gives the result as a call does, owned: moved out of a task that is a
-  temporary (`await f(x)`), a copy from a kept handle. Any result type works
-  except `any` (not supported yet); a closure result is an `Fn<…>`
-  (`async Fn<int(int)> f()`), and a plain `tuple` result is a dynamic tuple.
+  temporary (`await f(x)`), a copy from a kept handle. Any result type works; a
+  closure result is an `Fn<…>` (`async Fn<int(int)> f()`), and a plain `tuple`
+  result is a dynamic tuple.
 
 ## The `art` runtime module
 
@@ -1112,7 +1113,7 @@ What is copied depends on the type:
 | tuple | a new tuple with each element cloned (a tuple of plain values, being immutable, is shared) |
 | tagged enum | the active variant's payload cloned |
 | `bigint`, `fixed` | the value |
-| `any` | a wrapped `string` is copied; any other wrapped value is a value or a borrow and stays |
+| `any` | the value it holds, cloned by its type |
 | closure | shared: its captures cannot change |
 | `weak<T>` | another weak reference to the same container |
 | `new` pointer | a new block of the same size, each element cloned |

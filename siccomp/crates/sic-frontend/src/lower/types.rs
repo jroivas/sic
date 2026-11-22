@@ -646,19 +646,26 @@ pub fn fixed_full_dims(t: &Type) -> Option<FixedDims> {
 //
 // A `type` value is a pointer to a static `__sic_type_info` record, laid out (on
 // a 64-bit target) as opaque bytes: `[ char* name @0 | u64 id @8 | u32 size @16 |
-// u32 kind @20 | clone @24 ]` (32 bytes); `clone(void *p)` makes a byte copy of a
-// value at `p` independent (sic.md §"Copying: clone"), null when the bytes are
-// the whole value. `id` is a stable 64-bit FNV-1a hash of the canonical
+// u32 kind @20 | clone @24 | share @32 | retain @40 | release @48 ]` (56 bytes);
+// `clone(void *p)` makes a byte copy of a value at `p` independent (sic.md
+// §"Copying: clone"), null when the bytes are the whole value. `share`,
+// `retain` and `release` are how a copy of a value at `p` is owned, as the
+// compiler owns one (`share` before copying a counted struct, `retain` the
+// copy, `release` it), null when the type owns nothing: an `any` holding the
+// value uses them. `id` is a stable 64-bit FNV-1a hash of the canonical
 // type name, so equality is consistent across translation units. The value type
 // is a marker pointer (`Pointer(Struct("__sic_type_info"))`), like `fixed`.
 
 pub const TYPEINFO_MARKER: &str = "__sic_type_info";
-pub const TYPEINFO_REC_SIZE: usize = 32;
+pub const TYPEINFO_REC_SIZE: usize = 56;
 pub const TYPEINFO_OFF_NAME: usize = 0;
 pub const TYPEINFO_OFF_ID: usize = 8;
 pub const TYPEINFO_OFF_SIZE: usize = 16;
 pub const TYPEINFO_OFF_KIND: usize = 20;
 pub const TYPEINFO_OFF_CLONE: usize = 24;
+pub const TYPEINFO_OFF_SHARE: usize = 32;
+pub const TYPEINFO_OFF_RETAIN: usize = 40;
+pub const TYPEINFO_OFF_RELEASE: usize = 48;
 
 /// The `type` value type — a pointer to a `__sic_type_info` record.
 pub fn type_info_type() -> Type {
@@ -674,20 +681,43 @@ pub fn is_type_info(t: &Type) -> bool {
 
 // ─── `any`: a boxed dynamically-typed value (sic.md std) ──────────────────────
 //
-// `any` is a 16-byte value `{ const __sic_type_info* ty; u64 slot }`: `ty` is the
-// boxed value's runtime type (so `type(x)` reads it), and `slot` holds the value —
-// a scalar (int/float bits) or a pointer to an aggregate (string/fixed/bigint/…).
-// It's the element type of a `va_array`. Handled as an aggregate-by-pointer rvalue
-// like `string`/tuples.
+// `any` is a 32-byte value `{ const __sic_type_info* ty; u8 value[24] }`: `ty`
+// is the boxed value's runtime type (so `type(x)` reads it), and the value is
+// held in it — a scalar's bits, a pointer or handle (`fixed`, `bigint`, tuple,
+// container, closure) in the first word (`slot`), an aggregate of up to
+// `ANY_INLINE` bytes (a `string`'s descriptor, a small struct) in all three
+// words, and a bigger aggregate as a pointer in `slot`. An `any` a variable or
+// field holds owns its value (retained through `ty`'s functions; a bigger
+// aggregate is its own heap copy); one made for a call's argument (`va_array`)
+// borrows it. It's the element type of a `va_array`.
 
 pub const ANY_MARKER: &str = "__sic_any";
 
-/// The `any` value type — a `{ ty; slot }` struct (16 bytes).
+/// The bytes an `any` holds an aggregate in, inline.
+pub const ANY_INLINE: u64 = 24;
+
+/// The `any` value type — `{ ty; slot; w1; w2 }` (32 bytes).
 pub fn any_type() -> Type {
     Type::Struct(StructType::plain(Some(ANY_MARKER.to_string()), vec![
         ("ty".to_string(), type_info_type()),
         ("slot".to_string(), Type::Int { bits: 64, signed: false }),
+        ("w1".to_string(), Type::Int { bits: 64, signed: false }),
+        ("w2".to_string(), Type::Int { bits: 64, signed: false }),
     ], false))
+}
+
+/// True if an `any` holds a value of type `t` in its three words (an aggregate
+/// small enough), rather than its bits or its address in `slot`. The runtime
+/// tells it from the type info: an aggregate kind (`any_aggregate_kind`) and a
+/// size of at most `ANY_INLINE`.
+pub fn any_holds_inline(t: &Type, ptr_size: u32) -> bool {
+    any_aggregate_kind(type_kind(t)) && t.size_of(ptr_size) <= ANY_INLINE
+}
+
+/// The type kinds an `any` holds by value (inline or as its own copy) rather
+/// than as bits: string, array, struct, union.
+pub fn any_aggregate_kind(kind: u32) -> bool {
+    matches!(kind, 9 | 11 | 12 | 13)
 }
 
 /// True if `t` is the `any` value struct.

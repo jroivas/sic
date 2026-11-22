@@ -1460,6 +1460,12 @@ impl<'m> FuncCtx<'m> {
             if self.is_sic() && super::super::types::is_sic_string(&ret_ty) {
                 self.register_scope_exit(super::super::func::Cleanup::StringRelease { addr: slot.clone() });
             }
+            // A returned `any` owns its value, likewise; the slot is the `any`
+            // value (so it converts to the type it is assigned to).
+            if self.is_sic() && super::super::types::is_any(&ret_ty) {
+                self.register_scope_exit(super::super::func::Cleanup::AnyRelease { addr: slot.clone() });
+                if let Val::Local(id) = &slot { self.val_types.insert(id.0, ret_ty.clone()); }
+            }
             self.register_struct_temp(&slot, &ret_ty);
             return Ok(slot);
         }

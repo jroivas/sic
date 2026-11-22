@@ -26,6 +26,20 @@ fn goto_cleanups(scopes: &[(u32, Vec<Cleanup>)], kept: &[(u32, usize)]) -> Vec<C
     run
 }
 
+/// The ownership operations a type's info carries (`Lowerer::value_op_fn`).
+#[derive(Clone, Copy)]
+pub enum ValueOp { Share, Retain, Release }
+
+/// A type info's functions (sic.md §"RTTI"): `clone`, and `share` / `retain` /
+/// `release` for a copy of the value (`Lowerer::type_fns`).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct TypeFns {
+    pub clone: Option<FuncRef>,
+    pub share: Option<FuncRef>,
+    pub retain: Option<FuncRef>,
+    pub release: Option<FuncRef>,
+}
+
 /// What an async function's spawner needs (see `lower_async_function`).
 #[derive(Clone)]
 pub struct AsyncSpawn {
@@ -813,6 +827,11 @@ impl<'m> FuncCtx<'m> {
                     self.cstr_to_string_rc(v, rc)?
                 } else if super::types::is_complex(&agg_ty) {
                     self.lower_complex_as(e, &agg_ty)?
+                } else if self.is_sic() && super::types::is_any(&agg_ty) {
+                    // `return x;` from an `any` function boxes `x`; the caller's
+                    // copy owns its value (retained below), as a returned
+                    // string does.
+                    self.box_any(e)?
                 } else {
                     let p = self.lower_aggregate_ptr(e)?;
                     // `return f();` moves the call's managed-struct result out.
@@ -840,6 +859,9 @@ impl<'m> FuncCtx<'m> {
                     }
                     if self.returns_managed_copy(e, &agg_ty) {
                         self.retain_struct_owned_fields(sret_ptr.clone(), &agg_ty)?;
+                    }
+                    if self.is_sic() && super::types::is_any(&agg_ty) {
+                        self.any_refcount_at(sret_ptr.clone(), true)?;
                     }
                 }
             }
@@ -2430,11 +2452,6 @@ impl<'m> Lowerer {
             pnames.push((pn, pty));
         }
         let elem = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
-        // An `any` holding a string points at the string's descriptor, which
-        // may be in the frame that made it: it cannot outlive that frame yet.
-        if super::types::is_any(&elem) {
-            return Err(at(format!("async function `{}`: an `any` result is not supported", name)));
-        }
         let frame_ty = Type::Struct(sic_ir::StructType::plain(None, fields, false));
 
         // The body, as an ordinary function.
@@ -2638,14 +2655,23 @@ impl<'m> Lowerer {
     /// `p` owns — a task's result when its last handle goes, a container
     /// element that is an enum owning its payload.
     pub(crate) fn value_drop_fn(&mut self, elem: &Type) -> Result<String> {
+        self.value_op_fn(elem, ValueOp::Release)
+    }
+
+    /// A value of type `elem` at `p`, as the compiler owns a copy of one:
+    /// `__sic_share_<T>` gives a counted struct in it its count before it is
+    /// copied, `__sic_retain_<T>` makes the copy an owner, `__sic_drop_<T>`
+    /// releases one. Stored in `elem`'s type info, for an `any` holding it.
+    pub(crate) fn value_op_fn(&mut self, elem: &Type, op: ValueOp) -> Result<String> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", elem).hash(&mut h);
-        let sym = format!("__sic_drop_{:016x}", h.finish());
+        let kind = match op { ValueOp::Share => "share", ValueOp::Retain => "retain", ValueOp::Release => "drop" };
+        let sym = format!("__sic_{}_{:016x}", kind, h.finish());
         if self.module.func_ref_by_name(&sym).is_some() { return Ok(sym); }
         let voidp = Type::void_ptr();
         let sig = super::build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
-        let ps = vec![sic_ir::Param { name: "out".to_string(), ty: voidp }];
+        let ps = vec![sic_ir::Param { name: "p".to_string(), ty: voidp }];
         let mut func = Function::new(sym.clone(), sig, ps, Linkage::Internal);
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
@@ -2656,11 +2682,36 @@ impl<'m> Lowerer {
             let p = fc.alloc_val();
             fc.push_instr(Instr::Cast { dest: p, op: CastOp::BitCast, val: Val::Local(ValId(0x10000)), to_ty: pty.clone() });
             fc.val_types.insert(p.0, pty);
-            fc.release_managed_at(Val::Local(p), elem)?;
+            match op {
+                ValueOp::Share => fc.share_counted_at(&Val::Local(p), elem)?,
+                ValueOp::Retain => fc.retain_managed_at(Val::Local(p), elem)?,
+                ValueOp::Release => fc.release_managed_at(Val::Local(p), elem)?,
+            }
             fc.set_terminator(Terminator::Ret(None));
         }
         self.module.add_function(func);
         Ok(sym)
+    }
+
+    /// The functions a type's info carries (sic.md §"RTTI"): its clone, and how
+    /// a copy of it is owned (none for a type that owns nothing).
+    pub(crate) fn type_fns(&mut self, ty: &Type) -> TypeFns {
+        let clone = self.ensure_clone_fn(ty).ok().flatten();
+        if !self.sic { return TypeFns { clone, ..TypeFns::default() }; }
+        let f = |s: &mut Self, op| s.value_op_fn(ty, op).ok().and_then(|n| s.module.func_ref_by_name(&n));
+        // `holds_counted` is a function context's: ask a throwaway one.
+        let counted = {
+            let mut d = Function::new(String::new(), FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+            let fc = FuncCtx::new_with_func(self, &mut d);
+            fc.holds_counted(ty)
+        };
+        let managed = self.managed_value_type(ty);
+        TypeFns {
+            clone,
+            share: if counted { f(self, ValueOp::Share) } else { None },
+            retain: if managed { f(self, ValueOp::Retain) } else { None },
+            release: if managed { f(self, ValueOp::Release) } else { None },
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -9,7 +9,7 @@
 extern int dprintf(int fd, const char *fmt, ...);
 extern void abort(void);
 
-typedef struct __sic_tinfo { const char *name; unsigned long id; unsigned int size; unsigned int kind; void (*clone)(void *); } __sic_tinfo;
+typedef struct __sic_tinfo { const char *name; unsigned long id; unsigned int size; unsigned int kind; void (*clone)(void *); void (*share)(void *); void (*retain)(void *); void (*release)(void *); } __sic_tinfo;
 typedef struct __sic_tshape_elem { const __sic_tinfo *ti; unsigned long off; } __sic_tshape_elem;
 typedef struct __sic_tshape { unsigned long count; __sic_tshape_elem e[]; } __sic_tshape;
 

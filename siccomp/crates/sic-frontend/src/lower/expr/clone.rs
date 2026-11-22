@@ -170,20 +170,9 @@ impl<'m> FuncCtx<'m> {
             return Ok(());
         }
         if ty_::is_any(&rt) {
-            let f = self.lowerer.ensure_any_clone_fn()?;
-            let any_ty = ty_::any_type();
-            let usize_ty = Type::Int { bits: ps * 8, signed: false };
-            let sp = crate::lexer::Span::default();
-            let ty_lv = self.field_ptr_from(LValue::plain(ptr.clone(), any_ty.clone()), "ty", false, &sp)?;
-            let tyv = self.load_lvalue(&ty_lv)?;
-            let tyv = self.coerce(tyv, &voidp)?;
-            let slot_lv = self.field_ptr_from(LValue::plain(ptr, any_ty), "slot", false, &sp)?;
-            let slotv = self.load_lvalue(&slot_lv)?;
-            let slotv = self.coerce(slotv, &usize_ty)?;
-            let n = self.alloc_val();
-            self.push_instr(Instr::Call { dest: Some(n), func: f, args: vec![tyv, slotv], ret_ty: usize_ty.clone() });
-            let nv = self.coerce(Val::Local(n), &slot_lv.ty)?;
-            self.push_instr(Instr::Store { val: nv, ptr: slot_lv.ptr });
+            let f = self.lowerer.ensure_any_clone_at_fn();
+            let a = self.any_addr(ptr);
+            self.push_instr(Instr::Call { dest: None, func: f, args: vec![a], ret_ty: Type::Void });
             return Ok(());
         }
         if let Some(vs) = self.enum_payloads(&rt) {
@@ -450,6 +439,9 @@ impl<'m> FuncCtx<'m> {
         // released at scope exit unless bound; a tuple holds a reference; a
         // bignum is freed at statement end.
         if aggregate {
+            if ty_::is_any(&rt) {
+                self.register_scope_exit(super::super::func::Cleanup::AnyRelease { addr: slot.clone() });
+            }
             if ty_::is_sic_string(&rt) {
                 self.register_scope_exit(super::super::func::Cleanup::StringRelease { addr: slot.clone() });
             }
@@ -743,56 +735,4 @@ impl Lowerer {
         })
     }
 
-    /// `u64 __sic_any_clone(void *ty, u64 slot)`: an `any` owns only a wrapped
-    /// `string` — give the clone its own (a new string box); any other slot is
-    /// a value or a borrow and stays.
-    pub(crate) fn ensure_any_clone_fn(&mut self) -> Result<FuncRef> {
-        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
-        let voidp = Type::void_ptr();
-        let u32_ty = Type::Int { bits: 32, signed: false };
-        let ps = self.ptr_size;
-        self.synth_fn("__sic_any_clone", usize_ty.clone(), vec![voidp.clone(), usize_ty.clone()], move |fc| {
-            let tyv = Val::Local(ValId(0x10000));
-            let slot = Val::Local(ValId(0x10001));
-            let out = fc.alloc_val();
-            fc.push_instr(Instr::Alloca { dest: out, ty: usize_ty.clone(), align: None });
-            fc.push_instr(Instr::Store { val: slot.clone(), ptr: Val::Local(out) });
-            let kind_bb = fc.new_block_after_current();
-            let str_bb = fc.new_block_after_current();
-            let done = fc.new_block_after_current();
-            let ti = fc.coerce(tyv.clone(), &usize_ty)?;
-            let is_null = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: ti, rhs: Constant::int(0), ty: usize_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done, else_bb: kind_bb });
-            fc.switch_to_block(kind_bb);
-            let kp = fc.alloc_val();
-            fc.push_instr(Instr::GetElemPtr { dest: kp, base: tyv, index: Constant::int(ty_::TYPEINFO_OFF_KIND as i64),
-                elem_size: 1, result_ty: Type::Pointer(Box::new(u32_ty.clone())) });
-            let k = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: k, ptr: Val::Local(kp), ty: u32_ty.clone() });
-            let is_str = fc.alloc_val();
-            let sk = ty_::type_kind(&ty_::sic_string_type(ps)) as i64;
-            fc.push_instr(Instr::Cmp { dest: is_str, op: CmpOp::IEq, lhs: Val::Local(k), rhs: Constant::int(sk), ty: u32_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_str), then_bb: str_bb, else_bb: done });
-            fc.switch_to_block(str_bb);
-            // The slot points at a string descriptor: copy its bytes into a new
-            // owned box (released by the `any`'s release, like a container's).
-            let sty = ty_::sic_string_type(ps);
-            let dp = fc.coerce(slot, &Type::Pointer(Box::new(sty.clone())))?;
-            let (d0, d0t, _) = fc.member_at(&dp, &sty, 0).expect("string data");
-            let data = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: data, ptr: d0, ty: d0t });
-            let (d1, d1t, _) = fc.member_at(&dp, &sty, 1).expect("string size");
-            let size = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: size, ptr: d1, ty: d1t });
-            let boxed = fc.emit_dict_owned_string(Val::Local(data), Val::Local(size))?;
-            let bv = fc.coerce(boxed, &usize_ty)?;
-            fc.push_instr(Instr::Store { val: bv, ptr: Val::Local(out) });
-            fc.set_terminator(Terminator::Jump(done));
-            fc.switch_to_block(done);
-            let r = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(out), ty: usize_ty.clone() });
-            Ok(Some(Val::Local(r)))
-        })
-    }
 }

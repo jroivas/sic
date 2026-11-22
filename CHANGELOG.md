@@ -127,7 +127,16 @@
   key reads as `None`.
 - An async function takes a plain `tuple` parameter, static or dynamic as
   its calls give it (it was a compile error).
-- Async functions return any type but `any`: `bigint`, `fixed`, tuples
+- An `any` holds its value: a string's descriptor or a struct of up to 24
+  bytes in itself (it is 32 bytes, was 16), a bigger struct as its own copy,
+  a number or handle as itself; one a variable, field or container keeps owns
+  what its value owns, through the type info (which gained `share`, `retain`
+  and `release`). It held an aggregate by its address, so an `any` that
+  outlived its source — returned, kept in a field or container, an async
+  result — pointed at a dead frame; `any f() { return 7; }` crashed, and a
+  struct stored into a `list<any>` was borrowed. `bigint d = a;` from an `any`
+  read its pointer as the number.
+- Async functions return any type: `bigint`, `fixed`, tuples
   (`tuple<…>`, or a plain `tuple` as a dynamic one) and closures (`Fn<…>`)
   were compile errors. `await` is a call of a generated function, so its
   result is owned as any call's is; it moves the result out of a temporary

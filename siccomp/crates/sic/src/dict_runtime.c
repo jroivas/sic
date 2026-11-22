@@ -5,7 +5,7 @@ extern void *memcpy(void *, const void *, unsigned long);
 extern int memcmp(const void *, const void *, unsigned long);
 /* Reclaim an owned value box by its `vowned` kind (1 = plain block, 2 = refcounted
    string). Defined in the list runtime, which is prepended whenever dict is used. */
-extern void __sic_box_free(unsigned long vslot, int vowned);
+extern void __sic_box_free(unsigned long vslot, int vowned, unsigned long vty);
 struct __sic_elem_tinfo;
 extern unsigned long __sic_box_clone(unsigned long vslot, int vowned, const struct __sic_elem_tinfo *ti);
 
@@ -128,7 +128,7 @@ __attribute__((weak)) void __sic_dict_set(
     int ent;
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
     if (ent >= 0) {
-        __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned); /* reclaim old */
+        __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned, d->ents[ent].vty); /* reclaim old */
         d->ents[ent].vty = vty; d->ents[ent].vslot = vslot; d->ents[ent].vowned = vowned;
         return;
     }
@@ -175,7 +175,7 @@ __attribute__((weak)) int __sic_dict_del(__sic_dict *d, int kind, unsigned long 
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
     if (ent < 0) return 0;
     if (d->ents[ent].kind == 2) free((void *)d->ents[ent].a);   /* string key bytes */
-    __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned);    /* owned value */
+    __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned, d->ents[ent].vty);    /* owned value */
     d->ents[ent].live = 0;
     d->index[slot] = -2;
     d->live--;
@@ -192,7 +192,7 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     for (unsigned long e = 0; e < d->nents; e++) {
         if (!d->ents[e].live) continue;
         if (d->ents[e].kind == 2) free((void *)d->ents[e].a);   /* string key bytes */
-        __sic_box_free(d->ents[e].vslot, d->ents[e].vowned);    /* owned value */
+        __sic_box_free(d->ents[e].vslot, d->ents[e].vowned, d->ents[e].vty);    /* owned value */
     }
     free(d->ents);
     free(d->index);
