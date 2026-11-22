@@ -1155,8 +1155,11 @@ impl Parser {
                         self.advance();
                         let i = if self.at(TokenKind::Comma) { None } else { Some(self.parse_fixed_dim()?) };
                         self.expect(TokenKind::Comma)?;
-                        let f = if self.at(TokenKind::Gt) { None } else { Some(self.parse_fixed_dim()?) };
-                        self.expect(TokenKind::Gt)?;
+                        // The closing `>` may be the first of a `>>` / `>>>` that
+                        // also closes an enclosing generic (`list<fixed<10,2>>`).
+                        let closes = matches!(self.peek_kind(), TokenKind::Gt | TokenKind::Shr | TokenKind::RotR);
+                        let f = if closes { None } else { Some(self.parse_fixed_dim()?) };
+                        self.eat_generic_gt()?;
                         (i, f)
                     } else {
                         (None, None)
@@ -1940,7 +1943,7 @@ impl Parser {
                 let payload = if self.lang == Lang::Sic && self.at(TokenKind::Lt) {
                     self.advance();
                     let ty = self.parse_type_name()?;
-                    self.expect(TokenKind::Gt)?;
+                    self.eat_generic_gt()?;   // `Some<list<int>>`
                     Some(ty)
                 } else if self.lang == Lang::Sic && self.at(TokenKind::LParen) {
                     self.advance();

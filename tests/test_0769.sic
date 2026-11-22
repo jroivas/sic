@@ -1,0 +1,27 @@
+// A `fixed<…>` or an enum payload `Name<T>` closes with the first `>` of a
+// `>>` / `>>>` that also closes an enclosing generic: `list<fixed<10,2>>` and
+// `Full<list<int>>` were parse errors (they needed `> >`). Returns 42.
+enum Box { Full<list<int>>, Empty };
+
+int main() {
+    int r = 0;
+    list<fixed<10,2>> l;
+    fixed<10,2> a = 1.25;
+    l.add(a);
+    if (l[0] == a) r += 1;
+    dict<int, fixed<6,>> d;
+    d[1] = 2.5;
+    fixed<6,1> h = 2.5;
+    if (d[1] == h) r += 1;
+    list<list<fixed<3,1>>> n;
+    list<fixed<3,1>> in;
+    in.add(1.5);
+    n.add(in);
+    if (n.length == 1 && n[0].length == 1) r += 1;
+    list<int> li;
+    li.add(4);
+    Box b = Box::Full(li);
+    match (b) { Full(x): r += x.length; Empty: r += 10; }
+    if ((64 >> 2) == 16 && (1 <<< 1) == 2) r += 1;
+    return r == 5 ? 42 : r;
+}

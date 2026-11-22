@@ -161,6 +161,9 @@
   copied allocates nothing for it (binarytrees made twice the allocations
   of C).
 
+- `list<fixed<10,2>>` and an enum payload `Full<list<int>>` parse: the
+  closing `>>` needed a space.
+
 ### Tools
 
 - `check.sh` builds both back ends and runs every suite with each, the compile
