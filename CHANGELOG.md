@@ -24,7 +24,8 @@
   `noreturn` is passed on; definitions in a PIE are reached directly.
 - LLVM: `-S` is LLVM's own assembly, inline asm as written (Linux's
   `asm-offsets.h` and `devicetable-offsets.h` come from it).
-- LLVM: `-fno-delete-null-pointer-checks` (Linux) is honoured.
+- LLVM: memory at address 0 is valid on every function (as
+  `-fno-delete-null-pointer-checks`, which Linux passes, always is).
 - LLVM: `__attribute__((target("avx2")))` gives the function its own CPU
   features (`arch=` its CPU), and sic does not inline it into a caller of
   another target; a read-write `"+x"` operand on a `vector_size` value, of
@@ -67,6 +68,18 @@
   warning on a definition and silently System V on a function pointer.
   `long double` parameters and results are an error with `ms_abi`. Tested
   against GCC in both directions by `tests/abi/abi.sh`.
+- sic does not optimize on undefined behavior, in C either: what the
+  program does is what the operations do at run time. So:
+  - an integer division by zero, and `INT_MIN / -1`, traps on both back ends
+    (`INT_MIN % -1` is 0), also when its result is unused (it was dropped, as
+    GCC and Clang drop it), and LLVM is not let to assume the divisor
+    non-zero;
+  - an `int` constant expression that overflows wraps as the operation at run
+    time does (it became a `long`: `2147483647 * 2` was 4294967294);
+  - LLVM: a local or `alloca` never written reads as 0, not as `undef` LLVM may
+    take for any value, and a dereference does not prove a pointer non-null;
+  - a call through a one-entry table of functions with another index traps
+    (it called the entry).
 - System V calls of structs and unions now match GCC: one passed through `...`
   goes by value (in registers or on the stack, and `va_arg` reads it from
   there), where sic passed and read its address; and one whose eightbytes no

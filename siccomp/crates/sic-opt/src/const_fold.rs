@@ -91,7 +91,10 @@ impl ConstFold {
                 let op = *op;
                 if let Some((v, w)) = as_int(inner) {
                     match op {
-                        UnOpKind::Neg => self.set(e, ExprKind::IntLit(v.wrapping_neg(), w)),
+                        // `-INT_MIN` overflows: left to `ir-fold`, as above.
+                        UnOpKind::Neg => if let Some(n) = v.checked_neg().filter(|&n| w || i32::try_from(n).is_ok()) {
+                            self.set(e, ExprKind::IntLit(n, w))
+                        },
                         UnOpKind::BitNot => self.set(e, ExprKind::IntLit(!v, w)),
                         UnOpKind::Not => self.set(e, ExprKind::IntLit(i64::from(v == 0), false)),
                         _ => {}
@@ -123,26 +126,26 @@ fn truth(e: &Expr) -> Option<bool> {
 /// 32-bit `int` `0`/`1` (as in C); arithmetic keeps the wider operand's width.
 fn fold_int(op: BinOpKind, l: i64, r: i64, w: bool) -> Option<ExprKind> {
     use BinOpKind::*;
-    let arith = |v: i64| {
-        // Promote to 64-bit if either operand was, or the result no longer fits
-        // a 32-bit type.
-        let is64 = w || v < i32::MIN as i64 || v > u32::MAX as i64;
-        ExprKind::IntLit(v, is64)
-    };
+    // The result has the operands' type: `long` if either is (`w`), else `int`.
+    // One that overflows it is not folded — it was made a wider literal, where
+    // the operation at run time wraps (and `unsafe` traps it): the typed
+    // `ir-fold` pass folds it at the right width, and the guard still sees it.
+    let fits = |v: i64| w || i32::try_from(v).is_ok();
+    let arith = |v: Option<i64>| v.filter(|&v| fits(v)).map(|v| ExprKind::IntLit(v, w));
     let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
     Some(match op {
-        Add => arith(l.wrapping_add(r)),
-        Sub => arith(l.wrapping_sub(r)),
-        Mul => arith(l.wrapping_mul(r)),
+        Add => arith(l.checked_add(r))?,
+        Sub => arith(l.checked_sub(r))?,
+        Mul => arith(l.checked_mul(r))?,
         // `/` and `%` are NOT folded on the untyped AST: their result is
         // type-sensitive — `1/3` is `0` as an integer but `0.333…` once a
         // float/`fixed` context promotes the literals (sic.md §"Built-in fixed
         // point"). Folding here would bake in the integer value before lowering
         // resolves the type, so it is left to the typed `ir-fold` pass, which folds
         // it correctly at the operands' resolved type.
-        BitAnd => arith(l & r),
-        BitOr => arith(l | r),
-        BitXor => arith(l ^ r),
+        BitAnd => arith(Some(l & r))?,
+        BitOr => arith(Some(l | r))?,
+        BitXor => arith(Some(l ^ r))?,
         // Shifts are NOT folded here either: the result type is the promoted
         // LEFT operand's (not the wider operand's), and an out-of-range count is
         // language-defined (sic.md §"Rotate and shift") — the typed `ir-fold`
@@ -167,20 +170,19 @@ fn fold_uint(op: BinOpKind, l: u64, r: u64, w: bool) -> Option<ExprKind> {
     // operand (`w`) yields a 64-bit result. (Previously this promoted to 64-bit
     // whenever the value exceeded `u32::MAX`, which silently disagreed with the
     // runtime and could flip a constant-folded branch condition.)
-    let arith = |v: u64| {
-        if w { ExprKind::UIntLit(v, true) }
-        else { ExprKind::UIntLit(v & 0xFFFF_FFFF, false) }
-    };
+    // An unsigned result that wraps is left to `ir-fold` too: C wraps it, but
+    // in sic's `unsafe` it traps, which a literal would hide.
+    let arith = |v: Option<u64>| v.filter(|&v| w || v <= u32::MAX as u64).map(|v| ExprKind::UIntLit(v, w));
     let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
     Some(match op {
-        Add => arith(l.wrapping_add(r)),
-        Sub => arith(l.wrapping_sub(r)),
-        Mul => arith(l.wrapping_mul(r)),
+        Add => arith(l.checked_add(r))?,
+        Sub => arith(l.checked_sub(r))?,
+        Mul => arith(l.checked_mul(r))?,
         // `/` and `%` are left to the typed `ir-fold` pass — their value is
         // type-sensitive under float/`fixed` promotion (see `fold_int`).
-        BitAnd => arith(l & r),
-        BitOr => arith(l | r),
-        BitXor => arith(l ^ r),
+        BitAnd => arith(Some(l & r))?,
+        BitOr => arith(Some(l | r))?,
+        BitXor => arith(Some(l ^ r))?,
         // Shifts are NOT folded here either: the result type is the promoted
         // LEFT operand's (not the wider operand's), and an out-of-range count is
         // language-defined (sic.md §"Rotate and shift") — the typed `ir-fold`
@@ -240,5 +242,27 @@ mod tests {
         let mut c = e(ExprKind::BinOp { op: BinOpKind::Lt, lhs: int(5), rhs: int(3) });
         cf.visit_expr(&mut c);
         assert!(matches!(c.kind, ExprKind::IntLit(0, _)));
+    }
+
+    #[test]
+    fn leaves_overflow_to_the_typed_fold() {
+        // `2147483647 * 2` (int) wraps at run time: it was folded to the long
+        // 4294967294. Kept, as is `-(-2147483647 - 1)`; what fits still folds.
+        let bin = |op, l: i64, r: i64| e(ExprKind::BinOp { op, lhs: int(l), rhs: int(r) });
+        let mut cf = ConstFold::new();
+        let mut x = bin(BinOpKind::Mul, 2147483647, 2);
+        cf.visit_expr(&mut x);
+        assert!(matches!(x.kind, ExprKind::BinOp { .. }));
+        let mut y = e(ExprKind::Unary { op: UnOpKind::Neg, expr: Box::new(e(ExprKind::IntLit(-2147483648, false))) });
+        cf.visit_expr(&mut y);
+        assert!(matches!(y.kind, ExprKind::Unary { .. }));
+        let mut z = bin(BinOpKind::Sub, -2147483647, 1);
+        cf.visit_expr(&mut z);
+        assert!(matches!(z.kind, ExprKind::IntLit(-2147483648, false)));
+        // `0xFFFFFFFFu + 1u` wraps (and `unsafe` traps it): kept.
+        let u = |v| Box::new(e(ExprKind::UIntLit(v, false)));
+        let mut w = e(ExprKind::BinOp { op: BinOpKind::Add, lhs: u(0xFFFF_FFFF), rhs: u(1) });
+        cf.visit_expr(&mut w);
+        assert!(matches!(w.kind, ExprKind::BinOp { .. }));
     }
 }

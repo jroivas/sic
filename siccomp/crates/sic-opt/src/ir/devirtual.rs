@@ -93,20 +93,10 @@ impl Devirtualize {
                             Self::trace_to_array(fptr, &m.functions[fi], m)
                     {
                         let known = targets.iter().filter(|t| t.is_some()).count();
-                        if targets.len() == 1 && targets[0].is_some() {
-                            // A one-slot table: any other index is out of bounds.
-                            let func = &mut m.functions[fi];
-                            let block = &mut func.blocks[bi];
-                            if let Instr::CallIndirect { dest, args, ret_ty, .. } = &block.instrs[ii] {
-                                block.instrs[ii] = Instr::Call {
-                                    dest: *dest,
-                                    func: targets[0].unwrap(),
-                                    args: args.clone(),
-                                    ret_ty: ret_ty.clone(),
-                                };
-                            }
-                            changed = true;
-                        } else if known >= 1 && known <= 16 {
+                        // A one-slot table too: an index past it is out of bounds,
+                        // which traps as with any other table — calling the one
+                        // entry for every index would take it for impossible.
+                        if known >= 1 && known <= 16 {
                             Self::rewrite_switch(m, fi, bi, ii, &call, targets, discriminator);
                             changed = true;
                         }

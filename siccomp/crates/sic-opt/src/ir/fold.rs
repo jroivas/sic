@@ -133,7 +133,15 @@ fn fold_binop(op: BinOp, l: &Constant, r: &Constant, ty: &Type) -> Option<Consta
         Or  => wrap_int(as_int(l)? | as_int(r)?, ty),
         Xor => wrap_int(as_int(l)? ^ as_int(r)?, ty),
         Shl => wrap_int(as_int(l)?.wrapping_shl(as_uint(r)? as u32), ty),
-        SDiv => { let b = as_int(r)?; if b == 0 { return None; } wrap_int(as_int(l)?.wrapping_div(b), ty) }
+        // `INT_MIN / -1` traps at run time (on both back ends, as the hardware
+        // divide): not a value to fold to. (`INT_MIN % -1` is 0 on both.)
+        SDiv => {
+            let b = as_int(r)?;
+            let min = 1u64 << (bits - 1);
+            let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            if b == 0 || (b == -1 && (as_int(l)? as u64) & mask == min) { return None; }
+            wrap_int(as_int(l)?.wrapping_div(b), ty)
+        }
         SRem => { let b = as_int(r)?; if b == 0 { return None; } wrap_int(as_int(l)?.wrapping_rem(b), ty) }
         UDiv => { let b = as_uint(r)?; if b == 0 { return None; } wrap_int((as_uint(l)? / b) as i128, ty) }
         URem => { let b = as_uint(r)?; if b == 0 { return None; } wrap_int((as_uint(l)? % b) as i128, ty) }
@@ -261,6 +269,12 @@ mod tests {
                    Some(Constant::Int(44)));
         // unsigned div by zero: not folded
         assert_eq!(fold_binop(BinOp::UDiv, &Constant::UInt(10), &Constant::UInt(0), &Type::u32()), None);
+        // `INT_MIN / -1` traps at run time: not folded; `% -1` is 0.
+        assert_eq!(fold_binop(BinOp::SDiv, &Constant::Int(i32::MIN as i64), &Constant::Int(-1), &Type::i32()), None);
+        assert_eq!(fold_binop(BinOp::SDiv, &Constant::Int(i64::MIN), &Constant::Int(-1), &Type::i64()), None);
+        assert_eq!(fold_binop(BinOp::SRem, &Constant::Int(i32::MIN as i64), &Constant::Int(-1), &Type::i32()), Some(Constant::Int(0)));
+        assert_eq!(fold_binop(BinOp::SDiv, &Constant::Int(-6), &Constant::Int(-1), &Type::i32()), Some(Constant::Int(6)));
+
     }
 
     #[test]

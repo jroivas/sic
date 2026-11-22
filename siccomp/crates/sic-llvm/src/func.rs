@@ -90,14 +90,25 @@ pub fn emit<'ctx>(cx: &Cx<'ctx, '_>, f: &Function, lf: FunctionValue<'ctx>) -> R
 impl<'ctx> Fx<'ctx, '_, '_> {
     pub fn b(&self) -> &inkwell::builder::Builder<'ctx> { self.cx.builder }
 
-    /// A stack object, in the entry block wherever it is asked for.
+    /// A stack object, in the entry block wherever it is asked for. It starts
+    /// zeroed: LLVM reads an object never written as `undef`, which it may take
+    /// for any value it likes (and branching on one is undefined behavior), so
+    /// a C read of an uninitialized local would be optimized on. The zeroing is
+    /// dead, and dropped, wherever the object is written before it is read.
     fn slot(&self, size: u32, align: u32) -> R<PointerValue<'ctx>> {
         let here = self.b().get_insert_block();
         self.b().position_at_end(self.entry);
         let p = self.b().build_alloca(self.cx.ctx.i8_type().array_type(size), "")?;
         p.as_instruction_value().ok_or("alloca")?.set_alignment(align).map_err(|e| e.to_string())?;
+        self.zero_fill(p, self.cx.ctx.i64_type().const_int(size as u64, false), align)?;
         if let Some(bb) = here { self.b().position_at_end(bb); }
         Ok(p)
+    }
+
+    /// Zero `n` bytes at `p` (a new stack object; see `slot`).
+    fn zero_fill(&self, p: PointerValue<'ctx>, n: IntValue<'ctx>, align: u32) -> R<()> {
+        self.b().build_memset(p, align.max(1), self.cx.ctx.i8_type().const_zero(), n)?;
+        Ok(())
     }
 
     /// `-g`: the variable `name` of `ty`, at the stack slot `slot`. One the IR
@@ -678,6 +689,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 let n = self.typed(size, cx.ctx.i64_type().into())?.into_int_value();
                 let p = self.b().build_array_alloca(cx.ctx.i8_type(), n, "")?;
                 p.as_instruction_value().ok_or("alloca")?.set_alignment(16).map_err(|e| e.to_string())?;
+                self.zero_fill(p, n, 16)?;
                 self.set(*dest, p.into());
             }
             Instr::BSwap { dest, val, ty } => {
@@ -737,6 +749,44 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         self.binop_values(op, l, r, t)
     }
 
+    /// The divisor of `x op y` made safe to divide by. LLVM takes a division by
+    /// zero, and `INT_MIN / -1`, for undefined behavior it may optimize on (drop
+    /// a later `y == 0` test, say); the hardware and Cranelift trap. So does
+    /// this: both trap here, and `INT_MIN % -1` is 0, as on Cranelift. A
+    /// constant divisor that cannot fault needs no test.
+    fn divisor(&self, op: BinOp, x: inkwell::values::IntValue<'ctx>, y: inkwell::values::IntValue<'ctx>)
+        -> R<inkwell::values::IntValue<'ctx>> {
+        let b = self.b();
+        let t = y.get_type();
+        let signed = matches!(op, BinOp::SDiv | BinOp::SRem);
+        if let Some(c) = y.get_sign_extended_constant() {
+            if c != 0 && !(signed && c == -1) { return Ok(y); }
+        }
+        let zero = b.build_int_compare(IntPredicate::EQ, y, t.const_zero(), "")?;
+        let (mut trap, mut y) = (zero, y);
+        if signed {
+            let bits = t.get_bit_width();
+            let min = t.const_int(1u64 << (bits - 1), false);
+            let ovf = b.build_and(
+                b.build_int_compare(IntPredicate::EQ, x, min, "")?,
+                b.build_int_compare(IntPredicate::EQ, y, t.const_all_ones(), "")?, "")?;
+            if op == BinOp::SDiv {
+                trap = b.build_or(trap, ovf, "")?;
+            } else {
+                y = b.build_select(ovf, t.const_int(1, false), y, "")?.into_int_value();
+            }
+        }
+        let fault = self.cx.ctx.append_basic_block(self.lf, "div.fault");
+        let ok = self.cx.ctx.append_basic_block(self.lf, "div.ok");
+        b.build_conditional_branch(trap, fault, ok)?;
+        b.position_at_end(fault);
+        let f = self.intrinsic("llvm.trap", &[])?;
+        b.build_call(f, &[], "")?;
+        b.build_unreachable()?;
+        b.position_at_end(ok);
+        Ok(y)
+    }
+
     fn binop_values(&self, op: BinOp, l: BasicValueEnum<'ctx>, r: BasicValueEnum<'ctx>, t: BasicTypeEnum<'ctx>) -> R<BasicValueEnum<'ctx>> {
         let b = self.b();
         use BasicValueEnum::*;
@@ -752,10 +802,15 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     BinOp::Add => b.build_int_add(x, y, "")?.into(),
                     BinOp::Sub => b.build_int_sub(x, y, "")?.into(),
                     BinOp::Mul => b.build_int_mul(x, y, "")?.into(),
-                    BinOp::SDiv => b.build_int_signed_div(x, y, "")?.into(),
-                    BinOp::UDiv => b.build_int_unsigned_div(x, y, "")?.into(),
-                    BinOp::SRem => b.build_int_signed_rem(x, y, "")?.into(),
-                    BinOp::URem => b.build_int_unsigned_rem(x, y, "")?.into(),
+                    BinOp::SDiv | BinOp::UDiv | BinOp::SRem | BinOp::URem => {
+                        let y = self.divisor(op, x, y)?;
+                        match op {
+                            BinOp::SDiv => b.build_int_signed_div(x, y, "")?.into(),
+                            BinOp::UDiv => b.build_int_unsigned_div(x, y, "")?.into(),
+                            BinOp::SRem => b.build_int_signed_rem(x, y, "")?.into(),
+                            _ => b.build_int_unsigned_rem(x, y, "")?.into(),
+                        }
+                    }
                     BinOp::And => b.build_and(x, y, "")?.into(),
                     BinOp::Or => b.build_or(x, y, "")?.into(),
                     BinOp::Xor => b.build_xor(x, y, "")?.into(),

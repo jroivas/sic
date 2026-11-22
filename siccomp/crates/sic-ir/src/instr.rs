@@ -387,8 +387,19 @@ impl Instr {
 
     /// Whether removing this instruction (when its result is unused) is safe —
     /// i.e. it has no side effect. Conservative: loads (possibly volatile MMIO),
-    /// stores, calls, allocas, and var-args are never removable.
+    /// stores, calls, allocas, and var-args are never removable. Nor is an
+    /// integer division that may fault: it traps on a zero divisor (and a
+    /// signed one on `INT_MIN / -1`) on both back ends, and dropping it would
+    /// take that for impossible.
     pub fn is_pure(&self) -> bool {
+        if let Instr::BinOp { op: op @ (BinOp::SDiv | BinOp::UDiv | BinOp::SRem | BinOp::URem), rhs, .. } = self {
+            let signed = matches!(op, BinOp::SDiv | BinOp::SRem);
+            return match rhs {
+                Val::Const(crate::Constant::Int(c)) => *c != 0 && !(signed && *c == -1),
+                Val::Const(crate::Constant::UInt(c)) => *c != 0 && !(signed && *c == u64::MAX),
+                _ => false,
+            };
+        }
         matches!(self,
             Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. }
             | Instr::Cast { .. } | Instr::BSwap { .. } | Instr::GetFieldPtr { .. }
