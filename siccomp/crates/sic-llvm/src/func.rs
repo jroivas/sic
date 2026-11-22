@@ -938,9 +938,12 @@ impl<'ctx> Fx<'ctx, '_, '_> {
     fn float_to_int(&self, v: BasicValueEnum<'ctx>, dst: BasicTypeEnum<'ctx>, signed: bool) -> R<BasicValueEnum<'ctx>> {
         let b = self.b();
         let t = dst.into_int_type();
-        let wide = if t.get_bit_width() < 32 { self.cx.ctx.i32_type() } else { t };
+        // As on Cranelift (see its `FPToUI`): a 32-bit unsigned result through
+        // 64 bits, so all of 0..=u32::MAX converts.
+        let wide = if t.get_bit_width() < 32 { self.cx.ctx.i32_type() }
+            else if !signed && t.get_bit_width() == 32 { self.cx.ctx.i64_type() } else { t };
         let s = self.sat("llvm.fptosi.sat", v, wide.into())?;
-        let r = if signed || wide.get_bit_width() < 64 { s } else {
+        let r = if signed || t.get_bit_width() < 64 { s } else {
             let u = self.sat("llvm.fptoui.sat", v, wide.into())?;
             let f = v.into_float_value();
             let neg = b.build_float_compare(FloatPredicate::OLT, f, f.get_type().const_zero(), "")?;

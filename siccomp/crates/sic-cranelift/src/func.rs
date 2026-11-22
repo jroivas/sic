@@ -1596,13 +1596,28 @@ fn emit_cast(
             }
         }
         CastOp::FPToUI  => {
-            // C (unsigned T)x where x is negative is UB; most platforms treat it
-            // as sign-conversion: cast to signed then reinterpret as unsigned.
+            // As GCC on x86-64: a narrow result through a 32-bit signed
+            // conversion, a 32-bit one through a 64-bit one (so all of
+            // 0..=u32::MAX converts), truncated; a 64-bit one unsigned when
+            // the value is not negative (a negative one converts as signed).
+            // Out of range, each saturates where GCC gives what `cvttsd2si`
+            // does: undefined in C, and defined here.
             if dst.bits() < 32 {
                 let w = builder.ins().fcvt_to_sint_sat(ct::I32, val);
                 builder.ins().ireduce(dst, w)
+            } else if dst.bits() == 32 {
+                let w = builder.ins().fcvt_to_sint_sat(ct::I64, val);
+                builder.ins().ireduce(dst, w)
             } else {
-                builder.ins().fcvt_to_sint_sat(dst, val)
+                let s = builder.ins().fcvt_to_sint_sat(dst, val);
+                let u = builder.ins().fcvt_to_uint_sat(dst, val);
+                let zero = if builder.func.dfg.value_type(val) == ct::F32 {
+                    builder.ins().f32const(0.0)
+                } else {
+                    builder.ins().f64const(0.0)
+                };
+                let neg = builder.ins().fcmp(cir::condcodes::FloatCC::LessThan, val, zero);
+                builder.ins().select(neg, s, u)
             }
         }
         CastOp::FPExt   => builder.ins().fpromote(dst, val),

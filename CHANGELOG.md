@@ -80,6 +80,9 @@
     take for any value, and a dereference does not prove a pointer non-null;
   - a call through a one-entry table of functions with another index traps
     (it called the entry).
+- A floating value converts to `unsigned` and `unsigned long` in all of their
+  range: they were clamped to the signed one's (`(unsigned)3e9` was
+  2147483647).
 - System V calls of structs and unions now match GCC: one passed through `...`
   goes by value (in registers or on the stack, and `va_arg` reads it from
   there), where sic passed and read its address; and one whose eightbytes no

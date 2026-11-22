@@ -215,9 +215,22 @@ fn fold_cast(op: CastOp, v: &Constant, to_ty: &Type) -> Option<Constant> {
         Trunc => wrap_int(vi?, to_ty),
         // bool is 0/1, unambiguous.
         BoolToInt => wrap_int(vi?, to_ty),
-        // Float→int is fine (the int result carries its width via `to_ty`).
-        FPToSI => wrap_int(as_float(v)? as i64 as i128, to_ty),
-        FPToUI => wrap_int(as_float(v)? as u64 as i128, to_ty),
+        // Float→int as the back ends convert at run time: saturating at 32 bits
+        // for a narrower result (then truncated), an unsigned 32-bit one through
+        // 64 bits, a 64-bit one at its own width (unsigned: a negative value as
+        // signed). Rust's `as` saturates, and makes NaN 0, as they do.
+        FPToSI | FPToUI => {
+            let f = as_float(v)?;
+            let bits = to_ty.int_bits()?;
+            let x: i128 = match (op, bits) {
+                (_, b) if b < 32 => f as i32 as i128,
+                (FPToSI, 32) => f as i32 as i128,
+                (FPToUI, 32) => f as i64 as i128,
+                (FPToSI, _) => f as i64 as i128,
+                _ => if f < 0.0 { f as i64 as i128 } else { f as u64 as i128 },
+            };
+            wrap_int(x, to_ty)
+        }
         // Any cast whose RESULT is a float (int→float, or float width change)
         // yields a width-ambiguous `Constant::Float` — leave those to codegen.
         SIToFP | UIToFP | FPExt | FPTrunc => return None,
@@ -274,7 +287,15 @@ mod tests {
         assert_eq!(fold_binop(BinOp::SDiv, &Constant::Int(i64::MIN), &Constant::Int(-1), &Type::i64()), None);
         assert_eq!(fold_binop(BinOp::SRem, &Constant::Int(i32::MIN as i64), &Constant::Int(-1), &Type::i32()), Some(Constant::Int(0)));
         assert_eq!(fold_binop(BinOp::SDiv, &Constant::Int(-6), &Constant::Int(-1), &Type::i32()), Some(Constant::Int(6)));
+    }
 
+    #[test]
+    fn float_to_int_folds_as_run_time_converts() {
+        let u32t = Type::u32();
+        assert_eq!(fold_cast(CastOp::FPToUI, &Constant::Float(3e9), &u32t), Some(Constant::UInt(3_000_000_000)));
+        assert_eq!(fold_cast(CastOp::FPToUI, &Constant::Float(1e19), &Type::u64()), Some(Constant::UInt(10_000_000_000_000_000_000)));
+        assert_eq!(fold_cast(CastOp::FPToSI, &Constant::Float(1e10), &Type::i32()), Some(Constant::Int(i32::MAX as i64)));
+        assert_eq!(fold_cast(CastOp::FPToSI, &Constant::Float(f64::NAN), &Type::i64()), Some(Constant::Int(0)));
     }
 
     #[test]
