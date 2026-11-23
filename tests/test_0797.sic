@@ -1,0 +1,17 @@
+// SIC bounds (sic.md §"Bounds"): a counting loop that calls functions stops at
+// its first bad access, not before it runs: the calls of earlier iterations
+// happen (the loop was proven once, before its first iteration, and the
+// program stopped there). The abort handler exits with 40 + the calls made:
+// i = 0..3 each call `note` before `a[3]` fails. Exit 44.
+#include <signal.h>
+#include <unistd.h>
+int calls = 0;
+void note(int i) { calls = calls + 1; }
+void on_abort(int sig) { _exit(40 + calls); }
+int main() {
+    signal(SIGABRT, on_abort);
+    int *a = new int[3];
+    int n = 5;
+    for (int i = 0; i < n; i++) { note(i); a[i] = i; }
+    return 0;
+}

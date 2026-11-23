@@ -5136,12 +5136,32 @@ impl<'m> FuncCtx<'m> {
         // in the pre-header). `bce_mark` is the point to truncate `bce_proven` back to
         // on loop exit, so proofs don't leak to sibling loops.
         let bce_mark = self.bce_proven.len();
+        let mut slow_bb = None;
         if self.is_sic() {
             if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
-                self.try_loop_bce(fi, c, p, body)?;
+                slow_bb = self.try_loop_bce(fi, c, p, body)?;
             }
         }
+        self.lower_for_blocks(cond, post, body)?;
+        if let Some(slow_bb) = slow_bb {
+            // The checked copy, run when the hoisted proof fails.
+            let join_bb = self.new_block_after_current();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(join_bb)); }
+            self.bce_proven.truncate(bce_mark);
+            self.switch_to_block(slow_bb);
+            self.lower_for_blocks(cond, post, body)?;
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(join_bb)); }
+            self.move_blocks_to_end(&[join_bb]);
+            self.switch_to_block(join_bb);
+        }
+        self.bce_proven.truncate(bce_mark);
+        self.exit_scope();
+        Ok(())
+    }
 
+    /// The blocks of a `for` loop after its init: the rotated guard, the body,
+    /// `post` and the back edge, ending in the exit block.
+    fn lower_for_blocks(&mut self, cond: &Option<Expr>, post: &Option<Expr>, body: &Stmt) -> Result<()> {
         let body_bb = self.new_block_after_current();
         let post_bb = self.new_block_after_current();
         let end_bb  = self.new_block_after_current();
@@ -5193,8 +5213,6 @@ impl<'m> FuncCtx<'m> {
         }
 
         self.switch_to_block(end_bb);
-        self.bce_proven.truncate(bce_mark);
-        self.exit_scope();
         Ok(())
     }
 
@@ -5401,30 +5419,30 @@ impl<'m> FuncCtx<'m> {
     /// not understand, or any sign that `i`/`HI`/`X`/`arr` could change in the body,
     /// makes it give up (the per-iteration checks stay). It never removes a check
     /// without a hoisted one that covers the same or a wider range.
-    fn try_loop_bce(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<()> {
+    fn try_loop_bce(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<Option<BlockId>> {
         use crate::ast::{ExprKind as E, BinOpKind as B};
         // -- induction variable + init value LO --
         let (ivar, lo) = match init {
             ForInit::Decl(Decl::Var { declarators, .. }) if declarators.len() == 1 => {
                 let d = &declarators[0];
-                match &d.init { Some(Initializer::Expr(e)) => (d.name.clone(), e.clone()), _ => return Ok(()) }
+                match &d.init { Some(Initializer::Expr(e)) => (d.name.clone(), e.clone()), _ => return Ok(None) }
             }
             ForInit::Expr(e) => match &e.kind {
                 E::Assign { op: None, lhs, rhs } => match &lhs.kind {
-                    E::Ident(n) => (n.clone(), (**rhs).clone()), _ => return Ok(()),
+                    E::Ident(n) => (n.clone(), (**rhs).clone()), _ => return Ok(None),
                 },
-                _ => return Ok(()),
+                _ => return Ok(None),
             },
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
         // -- bound HI and comparison kind from `i < HI` / `i <= HI` --
         let (hi, inclusive) = match &cond.kind {
             E::BinOp { op, lhs, rhs } => match (&lhs.kind, op) {
                 (E::Ident(n), B::Lt) if *n == ivar => ((**rhs).clone(), false),
                 (E::Ident(n), B::Le) if *n == ivar => ((**rhs).clone(), true),
-                _ => return Ok(()),
+                _ => return Ok(None),
             },
-            _ => return Ok(()),
+            _ => return Ok(None),
         };
         // -- step must be a POSITIVE increment of `i` (so `i` is non-decreasing and
         //    every used value is <= maxi); the exact stride does not matter for
@@ -5439,19 +5457,19 @@ impl<'m> FuncCtx<'m> {
                     if matches!(&a.kind, E::Ident(n) if *n == ivar) && positive_int_lit(b)),
             _ => false,
         };
-        if !pos_step { return Ok(()); }
+        if !pos_step { return Ok(None); }
         // LO and HI must be *simple* (pure, side-effect-free, no calls) so they can
         // be re-evaluated for the guard and cannot change under a body call.
-        let lo_ids = match simple_expr_idents(&lo) { Some(s) => s, None => return Ok(()) };
-        let hi_ids = match simple_expr_idents(&hi) { Some(s) => s, None => return Ok(()) };
+        let lo_ids = match simple_expr_idents(&lo) { Some(s) => s, None => return Ok(None) };
+        let hi_ids = match simple_expr_idents(&hi) { Some(s) => s, None => return Ok(None) };
 
         // -- scan the body: collect every name that could be modified/declared, and
         //    every fat-pointer affine access `arr[X + i]`. Bail on any unhandled or
         //    unsafe construct (e.g. a call, which could mutate HI/X globals). --
         let mut mods: sic_ir::fast_hash::HashSet<String> = sic_ir::fast_hash::HashSet::default();
         let mut accesses: Vec<(String, Expr, Option<Expr>)> = Vec::new(); // (arr, index-expr, X)
-        if !self.bce_scan(body, &ivar, &mut mods, &mut accesses) { return Ok(()); }
-        if accesses.is_empty() { return Ok(()); }
+        if !self.bce_scan(body, &ivar, &mut mods, &mut accesses) { return Ok(None); }
+        if accesses.is_empty() { return Ok(None); }
         // A call in the body could change any global or address-taken local. The
         // checks stay valid when every name they depend on is a constant (an enum
         // value or a folded `const` global) or a local whose address was never
@@ -5466,13 +5484,13 @@ impl<'m> FuncCtx<'m> {
             }
         };
         if has_call && (!call_safe(self, &ivar) || !hi_ids.iter().all(|n| call_safe(self, n))) {
-            return Ok(());
+            return Ok(None);
         }
 
         // -- invariance: the induction var, the bound's vars, and each candidate's X
         //    vars must NOT be modified in the body; the array must not be modified. --
-        if mods.contains(&ivar) { return Ok(()); }
-        if hi_ids.iter().any(|n| mods.contains(n)) { return Ok(()); }
+        if mods.contains(&ivar) { return Ok(None); }
+        if hi_ids.iter().any(|n| mods.contains(n)) { return Ok(None); }
         let _ = lo_ids; // LO is only evaluated once (init); its vars need not be invariant.
         let mut safe: Vec<(String, Expr, Option<Expr>)> = Vec::new();
         for (arr, idx, x) in accesses {
@@ -5488,12 +5506,20 @@ impl<'m> FuncCtx<'m> {
             };
             if x_ok { safe.push((arr, idx, x)); }
         }
-        if safe.is_empty() { return Ok(()); }
+        if safe.is_empty() { return Ok(None); }
 
         // -- emit the hoisted checks, guarded by the loop-entry condition so an
         //    empty loop (LO past HI) never triggers a spurious abort. `i == LO` here
         //    (init just ran), so lowering `cond` computes "will iterate at least
         //    once". `cond` is a simple `i <|<= HI` comparison (side-effect-free). --
+        // With calls in the body, the proof's result goes to `ok_slot` (true
+        // for a loop that does not run) instead of stopping the program.
+        let ok_slot = if has_call {
+            let s = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: s, ty: Type::Bool, align: None });
+            self.push_instr(Instr::Store { val: Constant::bool_val(true), ptr: Val::Local(s) });
+            Some(s)
+        } else { None };
         let will = self.lower_expr(cond)?;
         let willb = self.to_bool(will)?;
         let chk_bb = self.new_block_after_current();
@@ -5512,13 +5538,36 @@ impl<'m> FuncCtx<'m> {
                     Expr::new(E::BinOp { op: B::Add, lhs: Box::new(xe.clone()), rhs: Box::new(maxi.clone()) }, idx.span.clone()),
                 ),
             };
-            self.emit_hoisted_bounds_check(arr, &lo_idx)?;
-            self.emit_hoisted_bounds_check(arr, &hi_idx)?;
+            if has_call {
+                let a = self.hoisted_bounds_ok(arr, &lo_idx)?;
+                let b = self.hoisted_bounds_ok(arr, &hi_idx)?;
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::And, lhs: a, rhs: b, ty: Type::Bool });
+                let prev = self.alloc_val();
+                self.push_instr(Instr::Load { dest: prev, ptr: Val::Local(ok_slot.unwrap()), ty: Type::Bool });
+                let both = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: both, op: BinOp::And, lhs: Val::Local(prev), rhs: Val::Local(d), ty: Type::Bool });
+                self.push_instr(Instr::Store { val: Val::Local(both), ptr: Val::Local(ok_slot.unwrap()) });
+            } else {
+                self.emit_hoisted_bounds_check(arr, &lo_idx)?;
+                self.emit_hoisted_bounds_check(arr, &hi_idx)?;
+            }
             self.bce_proven.push((arr.clone(), bce_index_key(idx)));
         }
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cont_bb)); }
         self.switch_to_block(cont_bb);
-        Ok(())
+        let Some(ok_slot) = ok_slot else { return Ok(None) };
+        // A body with calls makes earlier iterations visible (output, files), so
+        // a failing proof must not stop the program before them: the loop is
+        // versioned, and the copy that runs when the proof fails checks every
+        // access and stops at the first bad one.
+        let ok = self.alloc_val();
+        self.push_instr(Instr::Load { dest: ok, ptr: Val::Local(ok_slot), ty: Type::Bool });
+        let fast_bb = self.new_block_after_current();
+        let slow_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(ok), then_bb: fast_bb, else_bb: slow_bb });
+        self.switch_to_block(fast_bb);
+        Ok(Some(slow_bb))
     }
 
     /// sic auto-vectorization: recognize a unit-stride counting loop whose body is a
@@ -6272,6 +6321,34 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Emit one hoisted fat-pointer bounds check `arr[idx]` (used by loop-BCE).
+    /// Whether `arr[idx]` is in bounds (a `bool`), as `emit_hoisted_bounds_check`
+    /// checks it.
+    fn hoisted_bounds_ok(&mut self, arr: &str, idx: &Expr) -> Result<Val> {
+        let arr_e = Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), idx.span.clone());
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let count = if let Some(n) = self.array_len(&arr_e) {
+            self.coerce(Constant::uint(n), &usize_ty)?
+        } else {
+            let base = self.lower_expr(&arr_e)?;
+            let elem = match self.val_type(&base) {
+                Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+                _ => Type::i32(),
+            };
+            let esz = elem.size_of(self.ptr_size()).max(1);
+            let b = self.expr_bounds(&arr_e, Some(base))?.expect("a `new` variable's bounds");
+            let e = self.coerce(Constant::uint(esz), &usize_ty)?;
+            let c = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: c, op: BinOp::UDiv, lhs: b.size, rhs: e, ty: usize_ty.clone() });
+            Val::Local(c)
+        };
+        let iv = self.lower_expr(idx)?;
+        let iv = self.coerce(iv, &Type::i64())?;
+        let iv = self.coerce(iv, &usize_ty)?;
+        let d = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: d, op: CmpOp::IULt, lhs: iv, rhs: count, ty: usize_ty });
+        Ok(Val::Local(d))
+    }
+
     fn emit_hoisted_bounds_check(&mut self, arr: &str, idx: &Expr) -> Result<()> {
         let arr_e = Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), idx.span.clone());
         // An array `T a[N]` (sic.md §"Bounds"): the index is below N.
@@ -6308,6 +6385,8 @@ impl<'m> FuncCtx<'m> {
             Stmt::Block(ss, _) => ss.iter().all(|s| self.bce_scan(s, ivar, mods, out)),
             Stmt::Decl(Decl::Var { declarators, .. }) => {
                 for d in declarators {
+                    // A `static` would be duplicated by a versioned copy.
+                    if matches!(d.ty.storage, Some(crate::ast::StorageClass::Static)) { return false; }
                     mods.insert(d.name.clone());
                     if let Some(Initializer::Expr(e)) = &d.init {
                         if !self.bce_scan_expr(e, ivar, mods, out) { return false; }
