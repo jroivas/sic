@@ -594,15 +594,32 @@ impl<'m> FuncCtx<'m> {
                 format!("-> applied to non-pointer (field '{}')", name),
                 base.span.file.clone(), base.span.line, base.span.col)),
         };
-        let lv = LValue::plain(ptr.clone(), struct_ty);
+        let lv = LValue::plain(ptr.clone(), struct_ty.clone());
         let field = self.field_ptr_from(lv, name, true, &base.span)?;
         // sic (sic.md §"Bounds"): the member lies in the object `base` points into.
         if self.is_sic() && !addr_only {
-            if let Some(b) = self.expr_bounds(base, Some(ptr))? {
-                let size = if field.bitfield.is_some() || !matches!(field.ty, Type::Array { len: 0, .. }) {
-                    field.ty.size_of(self.ptr_size())
-                } else { 0 };
-                self.emit_range_check(field.ptr.clone(), size, b)?;
+            let size = if field.bitfield.is_some() || !matches!(field.ty, Type::Array { len: 0, .. }) {
+                field.ty.size_of(self.ptr_size())
+            } else { 0 };
+            let at_start = matches!(&base.kind, ExprKind::Ident(n) if self.is_fat_local(n));
+            let offset = super::resolve_field_access(&struct_ty, name, self.ptr_size(), &self.lowerer.struct_types)
+                .map(|(off, _, _)| off);
+            match offset {
+                // `p->f` on a `new` allocation's own variable: the member ends
+                // `offset + size` bytes into it, within the header's size.
+                Some(off) if at_start && size > 0 => {
+                    let b = self.expr_bounds(base, Some(ptr))?.expect("a `new` variable's bounds");
+                    let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                    let end = self.coerce(Constant::uint(off + size), &usize_ty)?;
+                    let short = self.alloc_val();
+                    self.push_instr(Instr::Cmp { dest: short, op: CmpOp::IULt, lhs: b.size, rhs: end, ty: usize_ty });
+                    self.emit_bounds_fail_if(Val::Local(short))?;
+                }
+                _ => {
+                    if let Some(b) = self.expr_bounds(base, Some(ptr))? {
+                        self.emit_range_check(field.ptr.clone(), size, b)?;
+                    }
+                }
             }
         }
         Ok(field)

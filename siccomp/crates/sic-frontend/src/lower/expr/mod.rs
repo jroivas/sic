@@ -5169,7 +5169,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Branch to `__sic_bounds_fail()` when `oob` is true.
-    fn emit_bounds_fail_if(&mut self, oob: Val) -> Result<()> {
+    pub(crate) fn emit_bounds_fail_if(&mut self, oob: Val) -> Result<()> {
         let fail_bb = self.new_block_after_current();
         let ok_bb = self.new_block_after_current();
         self.set_terminator(Terminator::CondJump { cond: oob, then_bb: fail_bb, else_bb: ok_bb });
@@ -5241,20 +5241,23 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// The pointer local in `slot` (of type `ty`) was just set to the value of `e`:
-    /// record the object that value points into.
-    pub(crate) fn set_ptr_bounds(&mut self, slot: ValId, ty: &Type, e: &Expr) -> Result<()> {
-        let Some(&(lo_slot, size_slot)) = self.ptr_bounds.get(&slot) else { return Ok(()) };
+    /// record the object that value points into. True when `e` says the object
+    /// (it may still be one not known at run time, for `p = q`).
+    pub(crate) fn set_ptr_bounds(&mut self, slot: ValId, ty: &Type, e: &Expr) -> Result<bool> {
+        let Some(&(lo_slot, size_slot)) = self.ptr_bounds.get(&slot) else { return Ok(false) };
         let v = self.alloc_val();
         self.push_instr(Instr::Load { dest: v, ptr: Val::Local(slot), ty: ty.clone() });
         self.val_types.insert(v.0, ty.clone());
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
-        let (lo, size) = match self.expr_bounds(e, Some(Val::Local(v)))? {
+        let b = self.expr_bounds(e, Some(Val::Local(v)))?;
+        let known = b.is_some();
+        let (lo, size) = match b {
             Some(b) => (b.lo, b.size),
             None => (self.coerce(Constant::zero(), &Type::char_ptr())?, self.coerce(Constant::uint(0), &usize_ty)?),
         };
         self.push_instr(Instr::Store { val: lo, ptr: Val::Local(lo_slot) });
         self.push_instr(Instr::Store { val: size, ptr: Val::Local(size_slot) });
-        Ok(())
+        Ok(known)
     }
 
     /// The object (start, byte size) the pointer value of `e` points into, when
@@ -5424,9 +5427,19 @@ impl<'m> FuncCtx<'m> {
         if !self.tracks_bounds(&self.val_type(ptr)) && !matches!(self.infer_expr_type(p), Ok(Type::Array { .. })) {
             return Ok(());
         }
+        let at_start = matches!(&p.kind, ExprKind::Ident(n) if self.is_fat_local(n));
         if let Some(b) = self.expr_bounds(p, Some(ptr.clone()))? {
             let size = ty.size_of(self.ptr_size());
-            self.emit_range_check(ptr.clone(), size, b)?;
+            if at_start && size > 0 {
+                // A `new` allocation's own variable: its first `size` bytes.
+                let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                let end = self.coerce(Constant::uint(size), &usize_ty)?;
+                let short = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: short, op: CmpOp::IULt, lhs: b.size, rhs: end, ty: usize_ty });
+                self.emit_bounds_fail_if(Val::Local(short))?;
+            } else {
+                self.emit_range_check(ptr.clone(), size, b)?;
+            }
         }
         Ok(())
     }

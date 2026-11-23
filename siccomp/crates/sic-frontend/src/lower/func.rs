@@ -2958,9 +2958,11 @@ impl<'m> Lowerer {
                 fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone(), align: None });
                 if is_ref || is_fat_param {
                     fc.fat_locals.insert(ptr_vid);
-                } else if fc.is_sic() && fc.tracks_bounds(&pty) && !fc.escaped_names.contains(pname) {
+                } else if fc.is_sic() && fc.tracks_bounds(&pty) && !fc.escaped_names.contains(pname)
+                    && fc.moved_names.contains(pname)
+                {
                     // Any other pointer param: the caller's object is not known
-                    // (until the body assigns one).
+                    // until the body assigns one (never, if it is not assigned).
                     fc.new_ptr_bounds(ptr_vid);
                 }
                 if matches!(pty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
@@ -4063,8 +4065,13 @@ impl<'m> FuncCtx<'m> {
                         && self.tracks_bounds(&ty) && !self.escaped_names.contains(&d.name)
                     {
                         self.new_ptr_bounds(vid);
-                        if let Some(Initializer::Expr(e)) = &d.init {
-                            self.set_ptr_bounds(vid, &ty, e)?;
+                        let known = match &d.init {
+                            Some(Initializer::Expr(e)) => self.set_ptr_bounds(vid, &ty, e)?,
+                            _ => false,
+                        };
+                        // Not known now and never assigned: never known.
+                        if !known && !self.moved_names.contains(&d.name) {
+                            self.ptr_bounds.remove(&vid);
                         }
                     }
                     // Track last declared scalar local for implicit return

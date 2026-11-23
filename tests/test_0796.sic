@@ -1,0 +1,15 @@
+// SIC bounds (sic.md §"Bounds"): `p->f` and `*p` on a `new` allocation's own
+// variable are checked with one compare against the allocation's size; an
+// empty allocation has no first element. Exit 134 (abort).
+struct N { int key; N *left; N *right; };
+int main() {
+    N *t = new struct N;
+    t->key = 40; t->left = NULL; t->right = NULL;
+    int *c = new int[1];
+    *c = 2;
+    if (t->key + *c != 42) return 1;
+    int n = 0;
+    int *e = new int[n];
+    *e = 2;
+    return 0;
+}
