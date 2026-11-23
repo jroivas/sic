@@ -1,0 +1,14 @@
+// licm (sic-opt/src/licm.rs): hoisting an invariant `a[k]` out of a loop keeps
+// the loop condition evaluated exactly as often: it ran once more (the
+// rewrite tested it before the hoisted read and again on entering the loop).
+// Returns the condition's 4 calls.
+int calls = 0;
+int more(int i) { calls = calls + 1; return i < 3; }
+int main() {
+    int *a = new int[4];
+    a[2] = 5;
+    int k = 2;
+    int s = 0;
+    for (int i = 0; more(i); i++) s += a[k];
+    return calls;          // 4 iterations of the test: i = 0,1,2,3
+}

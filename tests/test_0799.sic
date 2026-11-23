@@ -1,0 +1,17 @@
+// licm (sic-opt/src/licm.rs): an invariant read is hoisted only above code
+// without calls, so a read that fails its bounds check stops the program after
+// the calls before it, as without the pass: `note()` runs once. The abort
+// handler exits with 40 + the calls made. Exit 41.
+#include <signal.h>
+#include <unistd.h>
+int calls = 0;
+void note() { calls = calls + 1; }
+void on_abort(int sig) { _exit(40 + calls); }
+int main() {
+    signal(SIGABRT, on_abort);
+    int *a = new int[4];
+    int k = 9;
+    int s = 0;
+    for (int i = 0; i < 3; i++) { note(); s += a[k]; }
+    return s;
+}

@@ -21,15 +21,24 @@
 //!
 //! The rewrite pulls the loop init out and guards the preload with the loop-entry
 //! test, so a zero-trip loop never speculatively performs the (bounds-checked)
-//! read:
+//! read. The loop becomes a `do`/`while`, so `cond` is evaluated exactly as
+//! often as before (a body with its own `continue`, which would skip `post`,
+//! is left alone):
 //!
 //! ```text
 //!   for (T j = LO; cond; post)  … arr[E] …
 //! =>
 //!   { T j = LO;
 //!     if (cond) { auto _licm0 = arr[E];
-//!                 for (; cond; post) … _licm0 … } }
+//!                 do { { … _licm0 … } post; } while (cond); } }
 //! ```
+//!
+//! Only a read that no call precedes in the body is hoisted (a call to a
+//! function of the unit that writes nothing but its own locals aside, and a
+//! declaration that may run a constructor counts as a call): the read then
+//! happens before anything the program can see, so a `new[]` read that fails
+//! its bounds check stops the program where the loop would have (even an
+//! abort handler finds the same state).
 //!
 //! C has the same guarantee for an ARRAY declared in the function (a local or a
 //! function-`static` `T a[N]`) whose name is only ever an index base: nothing
@@ -54,15 +63,29 @@ impl AstPass for Licm {
     fn name(&self) -> &'static str { "licm" }
     fn run(&mut self, tu: &mut TranslationUnit) -> bool {
         self.changed = false;
-        // Functions of this unit whose bodies make no calls.
+        // Functions of this unit whose bodies make no calls (and have no
+        // `asm`, which may be one).
         let mut leaf_fns: HashSet<String> = HashSet::default();
         for d in &mut tu.decls {
             if let Decl::Func { name, body: Some(stmts), .. } = d {
                 let mut cf = CallFinder::default();
                 for s in stmts.iter_mut() { cf.visit_stmt(s); }
-                if !cf.any { leaf_fns.insert(name.clone()); }
+                if !cf.any && !cf.asm { leaf_fns.insert(name.clone()); }
             }
         }
+        // Of those, the ones that write nothing but their own locals: a call to
+        // one leaves no trace.
+        let mut pure_fns: HashSet<String> = HashSet::default();
+        for d in &mut tu.decls {
+            if let Decl::Func { name, params, body: Some(stmts), .. } = d {
+                if !leaf_fns.contains(name) { continue; }
+                let mut ls = LocalWrites::default();
+                for p in params.iter() { if let Some(n) = &p.name { ls.locals.insert(n.clone()); } }
+                for s in stmts.iter_mut() { ls.visit_stmt(s); }
+                if !ls.outside { pure_fns.insert(name.clone()); }
+            }
+        }
+        let scalar_names = scalar_type_names(tu);
         for d in &mut tu.decls {
             if let Decl::Func { params, body: Some(stmts), .. } = d {
                 // Whole-function facts: non-escaping `new[]` locals + declared
@@ -77,6 +100,7 @@ impl AstPass for Licm {
                 if safe_arrays.is_empty() && c_arrays.is_empty() { continue; }
                 let mut h = Hoister {
                     safe_arrays, c_arrays, leaf_fns: leaf_fns.clone(),
+                    pure_fns: pure_fns.clone(), scalar_names: scalar_names.clone(),
                     locals: fs.locals, addr_taken: fs.addr_taken,
                     counter: 0, changed: false,
                 };
@@ -244,6 +268,8 @@ struct Hoister {
     safe_arrays: HashSet<String>,
     c_arrays: HashSet<String>,
     leaf_fns: HashSet<String>,
+    pure_fns: HashSet<String>,
+    scalar_names: HashSet<String>,
     locals: HashSet<String>,
     addr_taken: HashSet<String>,
     counter: usize,
@@ -268,6 +294,9 @@ impl Hoister {
             _ => return None,
         };
 
+        // `continue` would skip `post` in the rewritten `do`/`while`.
+        if has_continue(body) { return None; }
+
         // What the loop writes / modifies (body + post).
         let mut ws = WriteScan::default();
         { let mut b = body.clone(); ws.visit_stmt(&mut b);
@@ -291,6 +320,11 @@ impl Hoister {
             other => vec![other.clone()],
         };
         for st in stmts {
+            // A call makes the iteration so far visible (output, files, what an
+            // abort handler reads): a read after it must stay after it.
+            let mut calls = CallFinder { leaf_fns: Some(&self.pure_fns), ..Default::default() };
+            { let mut s2 = st.clone(); calls.visit_stmt(&mut s2); }
+            if calls.non_leaf || declares_object(&st, &self.scalar_names) { break; }
             let mut scan = |e: &mut Expr| {
                 unconditional_reads(e, &mut cs);
                 if c_ok { unconditional_reads(e, &mut cc); }
@@ -356,10 +390,8 @@ impl Hoister {
             };
             then_body.push(Stmt::Decl(decl));
         }
-        then_body.push(Stmt::For {
-            init: None, cond: Some(cond.clone()), post: Some(post.clone()),
-            body: body2, span: span.clone(),
-        });
+        let iter = Stmt::Block(vec![*body2, Stmt::Expr(post.clone(), span.clone())], span.clone());
+        then_body.push(Stmt::DoWhile { body: Box::new(iter), cond: cond.clone(), span: span.clone() });
         let guard = Stmt::If {
             cond: cond.clone(),
             then: Box::new(Stmt::Block(then_body, span.clone())),
@@ -371,13 +403,133 @@ impl Hoister {
 
 // ---- calls in a loop / unconditional reads -------------------------------------
 
+/// `s` declares a struct, union or other non-scalar object: one may have a
+/// constructor, a call no `Call` expression shows. `scalars` are the type
+/// names that are scalars (see `scalar_type_names`).
+fn declares_object(s: &Stmt, scalars: &HashSet<String>) -> bool {
+    let object = |t: &AstType| !is_scalar(t, scalars) && !matches!(t, AstType::Typeof(_) | AstType::Auto);
+    match s {
+        Stmt::Decl(Decl::Var { base_ty, declarators, .. }) =>
+            object(&base_ty.ty) || declarators.iter().any(|d| object(&d.ty.ty)),
+        _ => false,
+    }
+}
+
+/// `t` is a scalar (or pointer, or an array of them) type.
+fn is_scalar(t: &AstType, scalars: &HashSet<String>) -> bool {
+    match t {
+        AstType::Char { .. } | AstType::Short { .. } | AstType::Int { .. } | AstType::Long { .. }
+        | AstType::LongLong { .. } | AstType::Float | AstType::Double | AstType::LongDouble
+        | AstType::Bool | AstType::Complex(_) | AstType::Pointer { .. } | AstType::Enum(_) => true,
+        AstType::Array { base, .. } => is_scalar(&base.ty, scalars),
+        AstType::Named(n) => scalars.contains(n),
+        _ => false,
+    }
+}
+
+/// The type names that are scalars: SIC's built-in integer and float names
+/// (unless the unit typedefs them) and the unit's typedefs of scalar types.
+fn scalar_type_names(tu: &TranslationUnit) -> HashSet<String> {
+    let mut typedefs: Vec<(String, AstType)> = Vec::new();
+    for d in &tu.decls {
+        if let Decl::TypeDef { names, .. } = d {
+            for (n, qt) in names { typedefs.push((n.clone(), qt.ty.clone())); }
+        }
+    }
+    let mut set: HashSet<String> = ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128",
+        "isize", "usize", "f32", "f64", "u8char"].iter()
+        .filter(|b| !typedefs.iter().any(|(n, _)| n == *b))
+        .map(|b| b.to_string()).collect();
+    loop {
+        let before = set.len();
+        for (n, t) in &typedefs {
+            if !set.contains(n) && is_scalar(t, &set) { set.insert(n.clone()); }
+        }
+        if set.len() == before { return set; }
+    }
+}
+
+/// Whether a function writes anything but its own locals (see `pure_fns`).
+#[derive(Default)]
+struct LocalWrites { locals: HashSet<String>, outside: bool }
+impl LocalWrites {
+    fn note(&mut self, lhs: &Expr) {
+        match &lhs.kind {
+            ExprKind::Ident(n) if self.locals.contains(n) => {}
+            _ => self.outside = true,
+        }
+    }
+}
+impl MutVisitor for LocalWrites {
+    fn visit_decl(&mut self, d: &mut Decl) {
+        if let Decl::Var { declarators, .. } = d {
+            for de in declarators.iter() {
+                // A `static` local outlives the call.
+                if matches!(de.ty.storage, Some(StorageClass::Static)) { self.outside = true; }
+                self.locals.insert(de.name.clone());
+            }
+        }
+        walk_decl(self, d);
+    }
+    fn visit_stmt(&mut self, s: &mut Stmt) {
+        if matches!(s, Stmt::Delete(..) | Stmt::Asm(_)) { self.outside = true; }
+        walk_stmt(self, s);
+    }
+    fn visit_expr(&mut self, e: &mut Expr) {
+        match &e.kind {
+            ExprKind::Assign { lhs, .. } => self.note(lhs),
+            ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. } => self.note(expr),
+            ExprKind::Swap { .. } | ExprKind::New { .. } | ExprKind::Lambda { .. } => self.outside = true,
+            ExprKind::Unary { op: UnOpKind::Addr, .. } => self.outside = true,
+            _ => {}
+        }
+        walk_expr(self, e);
+    }
+}
+
+/// `body` has a `continue` for its own loop (not one of an inner loop).
+fn has_continue(body: &Stmt) -> bool {
+    #[derive(Default)]
+    struct F { found: bool }
+    impl MutVisitor for F {
+        fn visit_stmt(&mut self, s: &mut Stmt) {
+            match s {
+                Stmt::Continue(_) => self.found = true,
+                // A `continue` in an inner loop's body is that loop's; its
+                // header is still this loop's code (a statement expression).
+                Stmt::For { init, cond, post, .. } => {
+                    match init {
+                        Some(ForInit::Expr(e)) => self.visit_expr(e),
+                        Some(ForInit::Decl(d)) => self.visit_decl(d),
+                        None => {}
+                    }
+                    if let Some(e) = cond { self.visit_expr(e); }
+                    if let Some(e) = post { self.visit_expr(e); }
+                }
+                Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. } => self.visit_expr(cond),
+                Stmt::ForEach { iterable, .. } => self.visit_expr(iterable),
+                _ => walk_stmt(self, s),
+            }
+        }
+    }
+    let mut f = F::default();
+    let mut b = body.clone();
+    f.visit_stmt(&mut b);
+    f.found
+}
+
 #[derive(Default)]
 struct CallFinder<'a> {
     any: bool,
     non_leaf: bool,
+    asm: bool,
     leaf_fns: Option<&'a HashSet<String>>,
 }
 impl<'a> MutVisitor for CallFinder<'a> {
+    fn visit_stmt(&mut self, s: &mut Stmt) {
+        if let Stmt::Asm(_) = s { self.asm = true; self.non_leaf = true; }
+        walk_stmt(self, s);
+    }
     fn visit_expr(&mut self, e: &mut Expr) {
         if let ExprKind::Call { func, .. } = &e.kind {
             self.any = true;
