@@ -366,7 +366,7 @@ impl<'m> FuncCtx<'m> {
 
     /// A pointer type that is itself a value — a container, tuple, closure,
     /// weak or bignum handle — rather than a pointer to one.
-    fn is_builtin_handle(&self, t: &Type) -> bool {
+    pub(crate) fn is_builtin_handle(&self, t: &Type) -> bool {
         ty_::is_list(t) || ty_::is_dict(t) || ty_::is_set(t) || ty_::is_tuple(t) || ty_::is_closure(t)
             || ty_::is_weak_ref(t) || ty_::is_fixed(t) || ty_::is_bigint(t)
     }
@@ -403,7 +403,7 @@ impl<'m> FuncCtx<'m> {
         if let Type::Pointer(_) = &rt {
             if !self.is_builtin_handle(&rt) {
                 let fat = match &base.kind {
-                    ExprKind::Ident(n) => self.fat_locals.contains(n),
+                    ExprKind::Ident(n) => self.is_fat_local(n),
                     _ => false,
                 };
                 if !fat {

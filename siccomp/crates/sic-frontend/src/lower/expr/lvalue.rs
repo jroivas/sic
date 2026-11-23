@@ -220,6 +220,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_inner(&mut self, expr: &Expr) -> Result<LValue> {
+        // Only an access form takes `addr_only` (a compound literal's elements,
+        // say, are accesses of their own).
+        if !matches!(expr.kind, ExprKind::Index { .. } | ExprKind::Field { .. } | ExprKind::Arrow { .. }
+            | ExprKind::Unary { op: UnOpKind::Deref, .. })
+        {
+            self.addr_only = false;
+        }
         if let Some(lv) = self.complex_part_lvalue(expr)? { return Ok(lv); }
         // A global register variable has no storage; only asm operands name it.
         if let ExprKind::Ident(n) = &expr.kind {
@@ -279,6 +286,7 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => {
+                let addr_only = std::mem::take(&mut self.addr_only);
                 let ptr = self.lower_expr(inner)?;
                 let ptr_ty = self.val_type(&ptr);
                 // `*x`: if `x` is an array it decays to a pointer to its element, so
@@ -294,6 +302,7 @@ impl<'m> FuncCtx<'m> {
                     }
                     _ => self.pointee_of(&ptr_ty),
                 };
+                if !addr_only { self.check_deref(inner, &ptr, &inner_ty)?; }
                 Ok(LValue::plain(ptr, inner_ty))
             }
             ExprKind::Index { base, index } => self.lower_lvalue_index(base, index),
@@ -375,6 +384,8 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_lvalue_index(&mut self, base: &Expr, index: &Expr) -> Result<LValue> {
+        // `&a[i]` forms an address; it is not an access (see `addr_only`).
+        let addr_only = std::mem::take(&mut self.addr_only);
         // C subscript is commutative: `a[b]` == `*(a + b)` == `b[a]`. When the
         // "base" is a plain integer and the "index" is the pointer/array (`3[arr]`,
         // `i[p]`), swap them so the pointer is the base — otherwise the address
@@ -432,16 +443,22 @@ impl<'m> FuncCtx<'m> {
 
         let base_ty = self.val_type(&base_val);
 
-        // sic fat-pointer bounds check: for `name[i]` where `name` is a
-        // never-moved `new`/`@` pointer, verify `i*elem_size < header.size`.
-        if self.is_sic() {
-            if let ExprKind::Ident(name) = &base.kind {
-                // sic loop bounds-check elimination: skip the per-access check when
-                // an enclosing counting loop already proved this exact `arr[index]`
-                // in-bounds via a hoisted check on the loop's index extremes.
+        // sic bounds checks (sic.md §"Bounds"). The object a pointer points into
+        // is checked after the address is computed, below.
+        let mut range: Option<ObjBounds> = None;
+        if self.is_sic() && !addr_only {
+            let fat = matches!(&base.kind, ExprKind::Ident(name) if self.is_fat_local(name));
+            let logical = self.infer_expr_type(base).ok();
+            if fat {
+                // `name[i]` where `name` is a never-moved `new`/`@` pointer:
+                // verify `i*elem_size < header.size`. Loop bounds-check
+                // elimination skips the per-access check when an enclosing
+                // counting loop already proved this exact `arr[index]` in-bounds
+                // via a hoisted check on the loop's index extremes.
+                let ExprKind::Ident(name) = &base.kind else { unreachable!() };
                 let proven = { let key = super::super::func::bce_index_key(index);
                     self.bce_proven.iter().any(|(a, k)| a == name && *k == key) };
-                if self.fat_locals.contains(name) && !proven {
+                if !proven {
                     let elem = match &base_ty {
                         Type::Pointer(t) => super::super::types::resolve_aggregate(t, &self.lowerer.struct_types),
                         _ => Type::i32(),
@@ -449,6 +466,20 @@ impl<'m> FuncCtx<'m> {
                     let esz = elem.size_of(self.ptr_size()).max(1);
                     self.emit_bounds_check(base_val.clone(), idx_i64.clone(), esz)?;
                 }
+            } else if let Some(Type::Array { len, .. }) = logical {
+                // An array object `T a[N]` (a variable, member or element): the
+                // index is below N. A struct's trailing `[0]`/`[1]` member is the
+                // C idiom for data past the struct and is not checked.
+                if len > 0 && !self.is_trailing_array_member(base) {
+                    let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                    let n = self.coerce(Constant::uint(len as u64), &usize_ty)?;
+                    self.emit_index_below(idx_i64.clone(), n)?;
+                } else if len == 0 {
+                    // A variable-length array: its size is known at run time.
+                    range = self.expr_bounds(base, Some(base_val.clone()))?;
+                }
+            } else if matches!(logical, Some(Type::Pointer(_))) {
+                range = self.expr_bounds(base, Some(base_val.clone()))?;
             }
         }
 
@@ -475,13 +506,16 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         let result_ty = Type::Pointer(Box::new(elem_ty.clone()));
         self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size, result_ty });
+        if let Some(b) = range {
+            self.emit_range_check(Val::Local(dest), elem_size, b)?;
+        }
         Ok(LValue::plain(Val::Local(dest), elem_ty))
     }
 
     /// True for the commutative subscript form `int[ptr]` (e.g. `3[arr]`): the
     /// base is an integer/bool and the index is a pointer/array, so the two must be
     /// swapped. The ordinary `arr[i]`/`p[i]` forms (pointer/array base) return false.
-    fn index_operands_reversed(&mut self, base: &Expr, index: &Expr) -> bool {
+    pub(crate) fn index_operands_reversed(&mut self, base: &Expr, index: &Expr) -> bool {
         let base_is_int = matches!(self.infer_expr_type(base), Ok(Type::Int { .. } | Type::Bool));
         let index_is_ptr = matches!(self.infer_expr_type(index), Ok(Type::Pointer(_) | Type::Array { .. }));
         base_is_int && index_is_ptr
@@ -507,7 +541,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Whether `base.field` should auto-deref (sic): `base` is a plain-aggregate
     /// pointer, so `.` behaves like `->`.
-    fn field_auto_derefs(&self, base: &Expr) -> bool {
+    pub(crate) fn field_auto_derefs(&self, base: &Expr) -> bool {
         self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if self.is_plain_aggregate_ptr(&t))
     }
 
@@ -526,6 +560,9 @@ impl<'m> FuncCtx<'m> {
         if self.field_auto_derefs(base) {
             return self.lower_lvalue_arrow(base, name);
         }
+        // `&s.f`: the member of a struct place; the place itself is an access
+        // only through a pointer, which `s` is not.
+        self.addr_only = false;
         // base is normally a struct lvalue; but it can also be a struct *rvalue*
         // (e.g. `f().field` where `f` returns a struct by value), whose address is
         // the materialized temporary.
@@ -543,6 +580,7 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn lower_lvalue_arrow(&mut self, base: &Expr, name: &str) -> Result<LValue> {
         // base is a pointer to struct — or an array, which decays to a pointer
         // to its first element (`arr->field` ≡ `arr[0].field`).
+        let addr_only = std::mem::take(&mut self.addr_only);
         let ptr = self.lower_expr(base)?;
         let ptr_ty = self.val_type(&ptr);
         let struct_ty = match &ptr_ty {
@@ -555,8 +593,18 @@ impl<'m> FuncCtx<'m> {
                 format!("-> applied to non-pointer (field '{}')", name),
                 base.span.file.clone(), base.span.line, base.span.col)),
         };
-        let lv = LValue::plain(ptr, struct_ty);
-        self.field_ptr_from(lv, name, true, &base.span)
+        let lv = LValue::plain(ptr.clone(), struct_ty);
+        let field = self.field_ptr_from(lv, name, true, &base.span)?;
+        // sic (sic.md §"Bounds"): the member lies in the object `base` points into.
+        if self.is_sic() && !addr_only {
+            if let Some(b) = self.expr_bounds(base, Some(ptr))? {
+                let size = if field.bitfield.is_some() || !matches!(field.ty, Type::Array { len: 0, .. }) {
+                    field.ty.size_of(self.ptr_size())
+                } else { 0 };
+                self.emit_range_check(field.ptr.clone(), size, b)?;
+            }
+        }
+        Ok(field)
     }
 
     pub(crate) fn field_ptr_from(&mut self, lv: LValue, field_name: &str, via_ptr: bool, sp: &crate::lexer::Span) -> Result<LValue> {

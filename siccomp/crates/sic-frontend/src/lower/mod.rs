@@ -2622,8 +2622,8 @@ impl Lowerer {
     }
 
     /// Synthesize `void __sic_bounds_fail()` — write a message to stderr (fd 2)
-    /// and `abort()` on a failed fat-pointer bounds check (sic.md §"Scopes and
-    /// automatic release": "runtime exception").
+    /// and `abort()` on a failed bounds check (sic.md §"Bounds": "runtime
+    /// exception").
     pub(crate) fn ensure_bounds_fail_fn(&mut self) -> FuncRef {
         if let Some(f) = self.module.func_ref_by_name("__sic_bounds_fail") {
             return f;
@@ -2650,7 +2650,7 @@ impl Lowerer {
         func.blocks.push(BasicBlock::new(entry));
         {
             let mut fc = func::FuncCtx::new_with_func(self, &mut func);
-            let msg = "sic: fat-pointer bounds check failed\n";
+            let msg = "sic: out-of-bounds access\n";
             let ptr = fc.emit_cstring(msg);
             let ptr = fc.coerce(ptr, &voidp).unwrap();
             let len = fc.coerce(Constant::uint(msg.len() as u64), &usize_ty).unwrap();

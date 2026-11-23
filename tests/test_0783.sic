@@ -1,0 +1,104 @@
+// SIC bounds (sic.md §"Bounds"): accesses inside their object are not stopped,
+// however the pointer was formed. Each failed case returns its number; all
+// passing returns 42. (The out-of-bounds cases are tests 0784-0791.)
+struct Pair { int a; int b[3]; int c; };
+struct Msg { int len; char data[1]; };     // the C idiom for data past the struct
+
+struct Acc {
+    int total;
+    // A method's pointer parameter is whatever the caller passes, a stack array
+    // here: it has no `new` header to check against.
+    int sum(struct Acc *self, int *p, int n) {
+        for (int i = 0; i < n; i++) self->total += p[i];
+        return self->total;
+    }
+};
+
+int main() {
+    // A one-past-the-end pointer is formed and compared, never read.
+    int a[4];
+    for (int i = 0; i < 4; i++) a[i] = i + 1;
+    int s = 0;
+    for (int *p = a; p < &a[4]; p++) s += *p;
+    if (s != 10) return 1;
+    int *end = a + 4;
+    if (end - a != 4) return 2;
+
+    // `&x` is an object of its own.
+    int x = 5;
+    int *px = &x;
+    *px = 6;
+    if (x != 6 || px[0] != 6) return 3;
+
+    // Member arrays, through the struct and through a pointer to it.
+    struct Pair pr;
+    struct Pair *pp = &pr;
+    for (int i = 0; i < 3; i++) { pr.b[i] = i; pp->b[i] += 10; }
+    if (pr.b[2] != 12) return 4;
+    int *pb = pr.b;
+    pb[2] = 7;
+    if (pr.b[2] != 7) return 5;
+
+    // Bytes of an object through a cast.
+    int bytes = 0;
+    char *c = (char *)&pr;
+    for (int i = 0; i < sizeof(struct Pair); i++) bytes += c[i] != 0 ? 0 : 1;
+    if (bytes > sizeof(struct Pair)) return 6;
+
+    // A trailing one-element member is not checked against its length.
+    char *buf = new char[16];
+    struct Msg *m = (struct Msg *)buf;
+    m->len = 3;
+    m->data[0] = 'a'; m->data[2] = 'c';
+    if (m->data[2] != 'c') return 7;
+
+    // Rows of a two-dimensional array.
+    int g[3][4];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++) g[i][j] = i * 4 + j;
+    if (g[2][3] != 11) return 8;
+
+    // A variable-length array.
+    int n = 5;
+    int v[n];
+    for (int i = 0; i < n; i++) v[i] = i;
+    int *pv = v;
+    if (pv[4] != 4) return 9;
+
+    // A pointer moving between objects follows each.
+    int *q = a;
+    q[3] = 40;
+    q = pr.b;
+    q[1] = 41;
+    if (a[3] != 40 || pr.b[1] != 41) return 10;
+
+    // A `new` array reassigned, also in `unsafe`: checked against the
+    // allocation, not a header read at the wrong place.
+    int *h = new int[8];
+    unsafe { h = h + 1; }
+    h[6] = 9;                    // element 7 of 8
+    if (h[6] != 9) return 11;
+
+    // An inner variable of the same name is a different pointer.
+    int *w = new int[2];
+    {
+        int big[8];
+        int *w = big;
+        w[7] = 1;
+        if (big[7] != 1) return 12;
+    }
+    w[1] = 2;
+
+    // A method's pointer parameter (a stack array).
+    struct Acc acc;
+    if (acc.sum(a, 4) != 1 + 2 + 3 + 40) return 13;
+
+    // A pointer written through another pointer is not tracked, so not
+    // stopped either.
+    int *r = a;
+    int **rr = &r;
+    *rr = pr.b;
+    r[2] = 8;
+    if (pr.b[2] != 8) return 14;
+
+    return 42;
+}

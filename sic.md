@@ -29,6 +29,37 @@ would silently drop the fraction (and an out-of-range float is undefined in C).
 Write the cast: `int n = (int)d;`. An `any` holding a float that is read as an
 integer without a cast stops the program. Integers still widen to floats.
 
+### Bounds
+
+An access through a pointer stays inside the object the pointer was formed from,
+or the program stops with "sic: out-of-bounds access" (an abort). The object is
+known for:
+
+- an array `T a[N]`, as a variable, a struct member or an element: `a[i]` needs
+  `i < N`. A variable-length array has its length at run time.
+- a `new` allocation, through its own variable and through every pointer formed
+  from it: `a + k`, `&a[k]`, a cast.
+- `&x`: the object `x`.
+- a pointer local assigned any of these: after `int *p = a;`, `p[i]`, `*(p + i)`,
+  `p++` then `*p`, and `p->field` are all checked. A new assignment moves `p` to
+  the new object.
+
+Forming a pointer is not an access: `&a[N]` and `a + N` (the end of `a`) can be
+made and compared.
+
+A raw pointer, whose object the program doesn't say, is not checked. Raw pointers
+are those from C code or a C library (`malloc`), a global or struct member that
+holds a pointer, a function's pointer parameter (except a `static` function whose
+every call passes a `new` allocation), and a pointer local whose address is taken
+(`&p`). A struct's last member declared with 0 or 1 elements is the C idiom for
+data past the struct, so its length is not a bound.
+
+    int a[4];
+    int *p = a;
+    p[3] = 1;          // fine
+    p[4] = 1;          // stops: past the end of `a`
+    int *e = a + 4;    // fine: not an access
+
 ### Initialized variables
 
 All variables are initialized to 0 (or logically similar).

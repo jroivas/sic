@@ -33,17 +33,24 @@ int c[10] = a + b;          // ok — declared size matches
 
 ### Bounds checks
 
-Indexing a fat pointer — one returned by `new` or bound to a `@` reference — is
-bounds-checked at run time; an out-of-range access raises an exception:
+An access stays inside the object its pointer was formed from: a `new`
+allocation, a `@` reference, an array `T a[N]` (a variable, member or element) or
+`&x`. That also holds through every pointer formed from one (`a + k`, `&a[k]`,
+casts, a pointer local assigned one). An out-of-range access raises an
+exception:
 
 ```sic
 int *p = new int(3);
 p[10] = 1;                  // bounds check fails → abort
-del p;
+int a[4];
+int *q = a + 1;
+q[3] = 1;                   // a[4]: bounds check fails → abort
+int *end = a + 4;           // fine: forming the end pointer is not an access
 ```
 
-Plain C arrays follow C rules; see [memory & ownership](memory-and-ownership.md)
-for `new`/`del` and references.
+A raw pointer, from C code, `malloc` or a parameter, is not checked; see
+[sic.md §"Bounds"](../sic.md) for the exact rule, and
+[memory & ownership](memory-and-ownership.md) for `new`/`del` and references.
 
 ## Tuples
 

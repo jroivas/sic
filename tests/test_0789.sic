@@ -1,0 +1,10 @@
+// SIC bounds (sic.md §"Bounds"): a member array's length bounds its index,
+// also through a pointer to the struct (`b[3]` would be `c`). Exit 134 (abort).
+struct Pair { int a; int b[3]; int c; };
+int main() {
+    struct Pair s;
+    struct Pair *p = &s;
+    int i = 3;
+    p->b[i] = 5;
+    return s.c;
+}

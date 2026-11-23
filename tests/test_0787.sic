@@ -1,0 +1,9 @@
+// SIC bounds (sic.md §"Bounds"): a pointer into a `new` array keeps the
+// allocation's bounds (`q[5]` is element 7 of 4). Exit 134 (abort).
+int main() {
+    int *a = new int[4];
+    int *q = a + 2;
+    int i = 5;
+    q[i] = 9;
+    return 0;
+}

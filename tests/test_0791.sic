@@ -1,0 +1,10 @@
+// SIC bounds (sic.md §"Bounds"): a struct pointer into an allocation too small
+// for the struct: `p->c` is past its end. Exit 134 (abort).
+struct Three { long a; long b; long c; };
+int main() {
+    char *buf = new char[16];
+    struct Three *p = (struct Three *)buf;
+    p->a = 1;
+    p->c = 3;
+    return 0;
+}

@@ -1,0 +1,9 @@
+// SIC bounds (sic.md §"Bounds"): a pointer formed from a local array keeps
+// the array's bounds. Exit 134 (abort).
+int main() {
+    int a[4];
+    int b[4];
+    int *p = a;
+    p[5] = 7;
+    return b[1];
+}

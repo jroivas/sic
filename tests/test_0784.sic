@@ -1,0 +1,9 @@
+// SIC bounds (sic.md §"Bounds"): an index past a local array stops the
+// program (it wrote into the next variable). Exit 134 (abort).
+int main() {
+    int a[4];
+    int b[4];
+    int i = 5;
+    a[i] = 7;
+    return b[1];
+}

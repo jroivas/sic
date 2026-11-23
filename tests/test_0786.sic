@@ -1,0 +1,7 @@
+// SIC bounds (sic.md §"Bounds"): `*(a + k)` on a `new` array is checked like
+// `a[k]` (it was not). Exit 134 (abort).
+int main() {
+    int *a = new int[4];
+    *(a + 6) = 9;
+    return 0;
+}

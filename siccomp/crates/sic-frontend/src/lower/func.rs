@@ -411,11 +411,25 @@ pub struct FuncCtx<'m> {
     /// for the scopes it exits.
     pub continue_scope_depth: Vec<usize>,
     /// sic fat-pointer bounds checking (sic.md §"Scopes and automatic release"):
-    /// names of `new`-initialized / `@`-reference locals that are never mutated,
-    /// so `name[i]` can be bounds-checked against the header size at
+    /// the slots of `new`-initialized / `@`-reference locals that are never
+    /// mutated, so `name[i]` can be bounds-checked against the header size at
     /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
-    /// ARE reassigned / incremented (and so cannot be safely checked).
-    pub fat_locals: sic_ir::fast_hash::HashSet<String>,
+    /// ARE reassigned / incremented (and so cannot be safely checked). Keyed by
+    /// slot, not name: an inner `int *a = b;` is a different variable.
+    pub fat_locals: sic_ir::fast_hash::HashSet<ValId>,
+    /// sic: the object every other pointer local points into (sic.md §"Bounds"):
+    /// pointer slot → slots holding the object's start and byte size, updated at
+    /// each `p = …`. A start of 0 means the object is not known (a raw pointer),
+    /// and accesses through `p` are then not checked.
+    pub ptr_bounds: HashMap<ValId, (ValId, ValId)>,
+    /// Pre-scanned names written other than by `=`, `op=`, `++`/`--`: address
+    /// taken, swapped, unpacked into, an `asm` output. Such a pointer gets no
+    /// `ptr_bounds` (a write would bypass them).
+    pub escaped_names: sic_ir::fast_hash::HashSet<String>,
+    /// Set while lowering the operand of `&`: the outermost access (`&p[i]`,
+    /// `&*p`, `&p->f`) takes it on entry. Forming an address is not an access,
+    /// so that one is not bounds-checked (`&a[N]` is the end of `a`).
+    pub addr_only: bool,
     /// Variable-length array locals: pointer slot → slot holding the byte size.
     pub vla_sizes: HashMap<ValId, ValId>,
     /// `any` temporaries read from a dynamically typed tuple (value id → the
@@ -567,6 +581,9 @@ impl<'m> FuncCtx<'m> {
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: sic_ir::fast_hash::HashSet::default(),
+            ptr_bounds: HashMap::default(),
+            escaped_names: sic_ir::fast_hash::HashSet::default(),
+            addr_only: false,
             vla_sizes: HashMap::default(),
             borrowing_closures: HashMap::default(),
             strict_anys: HashMap::default(),
@@ -2217,11 +2234,16 @@ impl<'m> Lowerer {
         use crate::ast::{Decl, StorageClass, AstType};
         let mut fat: HashMap<String, sic_ir::fast_hash::HashSet<usize>> = HashMap::default();
         let mut pnames: HashMap<String, Vec<Option<String>>> = HashMap::default();
+        // Methods, constructors and destructors are called as `obj.m()` or
+        // implicitly, never by name: their calls are not seen here (a method's
+        // `self` is `&obj` of any object, a stack one too).
+        let implicit: sic_ir::fast_hash::HashSet<&String> = self.struct_methods.values()
+            .chain(self.struct_ctor.values()).chain(self.struct_dtor.values()).collect();
         for d in &tu.decls {
             if let Decl::Func { name, params, body: Some(_), storage, variadic, .. } = d {
                 let is_static = matches!(storage, Some(StorageClass::Static))
                     || self.static_funcs.contains(name);
-                if !is_static || *variadic { continue; }
+                if !is_static || *variadic || implicit.contains(name) { continue; }
                 let idxs: sic_ir::fast_hash::HashSet<usize> = params.iter().enumerate()
                     .filter(|(_, p)| matches!(&p.ty.ty, AstType::Pointer { .. }))
                     .map(|(i, _)| i).collect();
@@ -2902,7 +2924,10 @@ impl<'m> Lowerer {
         // sic bounds checking: pre-scan which locals are mutated, so only
         // never-moved `new`/`@` pointers are treated as checkable fat pointers.
         if fc.is_sic() {
-            for s in body { scan_mutated_stmt(s, &mut fc.moved_names); }
+            let mut scan = WriteScan::default();
+            for s in body { scan.stmt(s); }
+            fc.moved_names = scan.moved;
+            fc.escaped_names = scan.escaped;
         }
         let param_base = if is_sret { 1 } else { 0 };
         if is_sret {
@@ -2912,23 +2937,26 @@ impl<'m> Lowerer {
             if let Some(pname) = &p.name {
                 fc.decl_qtypes.insert(pname.clone(), p.ty.clone());
                 // A never-moved `@`-reference param is a checkable fat pointer.
-                if fc.is_sic()
+                let is_ref = fc.is_sic()
                     && p.ty.qualifiers.iter().any(|q| matches!(q, crate::ast::TypeQual::Reference { .. }))
-                    && !fc.moved_names.contains(pname)
-                {
-                    fc.fat_locals.insert(pname.clone());
-                }
+                    && !fc.moved_names.contains(pname);
                 // A pointer param proven to always receive a fat-pointer base (from
                 // the whole-unit `infer_fat_params` pass over static functions) is a
                 // checkable fat pointer too — so `p[i]` in the callee is bounds-checked
                 // (sic.md §"Scopes"). Excluded if the param is reassigned in the body.
                 let is_fat_param = fc.is_sic() && !fc.moved_names.contains(pname)
                     && fc.lowerer.fat_params.get(name).map_or(false, |s| s.contains(&i));
-                if is_fat_param { fc.fat_locals.insert(pname.clone()); }
                 let pty = ir_params[i].clone();
                 let sentinel = ValId((i + param_base) as u32 + 0x10000);
                 let ptr_vid = fc.alloc_val();
                 fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone(), align: None });
+                if is_ref || is_fat_param {
+                    fc.fat_locals.insert(ptr_vid);
+                } else if fc.is_sic() && fc.tracks_bounds(&pty) && !fc.escaped_names.contains(pname) {
+                    // Any other pointer param: the caller's object is not known
+                    // (until the body assigns one).
+                    fc.new_ptr_bounds(ptr_vid);
+                }
                 if matches!(pty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
                     // Aggregate params (struct/union/vector) are passed as a
                     // pointer; copy into the local alloca so the callee owns a copy.
@@ -4005,6 +4033,7 @@ impl<'m> FuncCtx<'m> {
                     // aborts (`for (i<n) d[i]=…` in a dict-returning fn).
                     let is_container = super::types::is_list(&ty)
                         || super::types::is_dict(&ty) || super::types::is_set(&ty);
+                    let mut fat = false;
                     if self.is_sic() && !d.name.is_empty() && !self.moved_names.contains(&d.name)
                         && !is_container {
                         let is_new_init = matches!(&d.init,
@@ -4012,7 +4041,18 @@ impl<'m> FuncCtx<'m> {
                         let is_ref = d.ty.qualifiers.iter()
                             .any(|q| matches!(q, crate::ast::TypeQual::Reference { .. }));
                         if is_new_init || is_ref {
-                            self.fat_locals.insert(d.name.clone());
+                            self.fat_locals.insert(vid);
+                            fat = true;
+                        }
+                    }
+                    // Any other pointer local remembers the object its value points
+                    // into, from the initializer on (sic.md §"Bounds").
+                    if self.is_sic() && !fat && !is_container && !d.name.is_empty()
+                        && self.tracks_bounds(&ty) && !self.escaped_names.contains(&d.name)
+                    {
+                        self.new_ptr_bounds(vid);
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            self.set_ptr_bounds(vid, &ty, e)?;
                         }
                     }
                     // Track last declared scalar local for implicit return
@@ -5630,7 +5670,7 @@ impl<'m> FuncCtx<'m> {
             // Only fat pointers (`new[]`/`@`) carry a size header to check; a raw
             // pointer (a `malloc`'d C array, or a plain pointer local) is unchecked
             // in the scalar loop too, so vectorizing it adds no bounds obligation.
-            if !self.fat_locals.contains(arr) { continue; }
+            if !self.is_fat_local(arr) { continue; }
             let (lo_idx, hi_idx) = match off {
                 None => (lo.clone(), maxi.clone()),
                 Some(xe) => (
@@ -5920,7 +5960,7 @@ impl<'m> FuncCtx<'m> {
                    else { Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(hi.clone()), rhs: Box::new(one) }, cond.span.clone()) };
         // Only a fat pointer carries a size header to check; a raw pointer is
         // unchecked in the scalar loop too, so vectorizing it adds no obligation.
-        if self.fat_locals.contains(&arr) {
+        if self.is_fat_local(&arr) {
             self.emit_hoisted_bounds_check(&arr, &lo)?;
             self.emit_hoisted_bounds_check(&arr, &maxi)?;
         }
@@ -6304,7 +6344,7 @@ impl<'m> FuncCtx<'m> {
                 // Record a fat-pointer affine access; always recurse to catch nested
                 // accesses / assignments inside the index or base.
                 if let E::Ident(arr) = &base.kind {
-                    if self.fat_locals.contains(arr) {
+                    if self.is_fat_local(arr) {
                         if let Some(x) = affine_x(index, ivar) {
                             out.push((arr.clone(), (**index).clone(), x));
                         }
@@ -7632,88 +7672,125 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
     }
 }
 
-/// Pre-scan: collect names of locals that are *mutated* somewhere in the body —
-/// reassigned (`x = …`, `x += …`), incremented (`x++`, `--x`), swapped (`x <> y`)
-/// or address-taken (`&x`). A `new`/`@` pointer in this set can't be safely
-/// bounds-checked via its header (it may no longer point at the allocation base),
-/// so it is excluded from `fat_locals`.
-fn scan_mutated_expr(e: &Expr, out: &mut sic_ir::fast_hash::HashSet<String>) {
-    use ExprKind::*;
-    // Record the mutated name at this node.
-    match &e.kind {
-        Assign { lhs, .. } => { if let Ident(n) = &lhs.kind { out.insert(n.clone()); } }
-        PreInc { expr, .. } | PostInc { expr, .. } => { if let Ident(n) = &expr.kind { out.insert(n.clone()); } }
-        Unary { op: crate::ast::UnOpKind::Addr, expr } => { if let Ident(n) = &expr.kind { out.insert(n.clone()); } }
-        Swap { lhs, rhs } => {
-            if let Ident(n) = &lhs.kind { out.insert(n.clone()); }
-            if let Ident(n) = &rhs.kind { out.insert(n.clone()); }
+/// Pre-scan of a function body: which names are written, and how.
+///   * `moved`: reassigned (`x = …`, `x += …`), incremented (`x++`, `--x`),
+///     swapped, unpacked into, an `asm` output, or address-taken. A `new`/`@`
+///     pointer in this set can't be bounds-checked via its header (it may no
+///     longer point at the allocation base), so it is not in `fat_locals`.
+///   * `escaped`: written other than by `=`, `op=`, `++`/`--` (address taken,
+///     swapped, unpacked into, an `asm` output). A pointer in this set has no
+///     `ptr_bounds`: such a write would bypass them.
+/// Names, not variables: a name is in a set if any variable of that name is.
+/// Every statement and expression is entered, lambda bodies included.
+#[derive(Default)]
+pub(crate) struct WriteScan {
+    pub(crate) moved: sic_ir::fast_hash::HashSet<String>,
+    pub(crate) escaped: sic_ir::fast_hash::HashSet<String>,
+}
+
+impl WriteScan {
+    fn escape(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Ident(n) => { self.moved.insert(n.clone()); self.escaped.insert(n.clone()); }
+            ExprKind::TupleExpr(xs) => for x in xs { self.escape(x); },
+            _ => {}
         }
-        _ => {}
     }
-    // Recurse into children.
-    match &e.kind {
-        BinOp { lhs, rhs, .. } | Comma(lhs, rhs) | Assign { lhs, rhs, .. } | Swap { lhs, rhs } => {
-            scan_mutated_expr(lhs, out); scan_mutated_expr(rhs, out);
+
+    pub(crate) fn expr(&mut self, e: &Expr) {
+        use ExprKind::*;
+        match &e.kind {
+            Assign { lhs, .. } => match &lhs.kind {
+                Ident(n) => { self.moved.insert(n.clone()); }
+                TupleExpr(_) => self.escape(lhs),
+                _ => {}
+            },
+            PreInc { expr, .. } | PostInc { expr, .. } => { if let Ident(n) = &expr.kind { self.moved.insert(n.clone()); } }
+            Unary { op: crate::ast::UnOpKind::Addr, expr } => self.escape(expr),
+            Swap { lhs, rhs } => { self.escape(lhs); self.escape(rhs); }
+            _ => {}
         }
-        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
-        | SizeofExpr(expr) | AlignofExpr(expr) | Cast { expr, .. } | Ref { expr, .. } => scan_mutated_expr(expr, out),
-        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
-            scan_mutated_expr(cond, out); scan_mutated_expr(then, out); scan_mutated_expr(else_, out);
+        match &e.kind {
+            BinOp { lhs, rhs, .. } | Comma(lhs, rhs) | Assign { lhs, rhs, .. } | Swap { lhs, rhs }
+            | Index { base: lhs, index: rhs } | VaStart { list: lhs, last: rhs } | VaCopy { dst: lhs, src: rhs } => {
+                self.expr(lhs); self.expr(rhs);
+            }
+            Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. } | Ref { expr, .. }
+            | Cast { expr, .. } | SizeofExpr(expr) | AlignofExpr(expr) | TypeId(expr)
+            | Field { base: expr, .. } | Arrow { base: expr, .. } | OptField { base: expr, .. }
+            | NamedArg { value: expr, .. } | VaArg { list: expr, .. } | VaEnd { list: expr } => self.expr(expr),
+            Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+                self.expr(cond); self.expr(then); self.expr(else_);
+            }
+            Elvis { cond, else_ } => { self.expr(cond); self.expr(else_); }
+            Call { func, args } => { self.expr(func); for a in args { self.expr(a); } }
+            New { args, .. } | TupleExpr(args) => for a in args { self.expr(a); },
+            Slice { base, lo, hi } => {
+                self.expr(base);
+                if let Some(x) = lo { self.expr(x); }
+                if let Some(x) = hi { self.expr(x); }
+            }
+            Match { scrutinee, arms } => { self.expr(scrutinee); for a in arms { self.stmt(&a.body); } }
+            Generic { controlling, assocs } => { self.expr(controlling); for (_, x) in assocs { self.expr(x); } }
+            CompoundLiteral { init, .. } => for it in init { self.init(&it.init); },
+            StmtExpr(v) | Guard { body: v, .. } | Lambda { body: v, .. } => for s in v { self.stmt(s); },
+            _ => {}
         }
-        Elvis { cond, else_ } => { scan_mutated_expr(cond, out); scan_mutated_expr(else_, out); }
-        Call { func, args } => { scan_mutated_expr(func, out); for a in args { scan_mutated_expr(a, out); } }
-        Index { base, index } => { scan_mutated_expr(base, out); scan_mutated_expr(index, out); }
-        Slice { base, lo, hi } => {
-            scan_mutated_expr(base, out);
-            if let Some(x) = lo { scan_mutated_expr(x, out); }
-            if let Some(x) = hi { scan_mutated_expr(x, out); }
+    }
+
+    fn init(&mut self, i: &Initializer) {
+        match i {
+            Initializer::Expr(e) => self.expr(e),
+            Initializer::List(items) => for it in items { self.init(&it.init); },
         }
-        New { args, .. } => { for x in args { scan_mutated_expr(x, out); } }
-        Field { base, .. } | Arrow { base, .. } => scan_mutated_expr(base, out),
-        Generic { controlling, assocs } => { scan_mutated_expr(controlling, out); for (_, x) in assocs { scan_mutated_expr(x, out); } }
-        StmtExpr(stmts) => { for s in stmts { scan_mutated_stmt(s, out); } }
-        VaStart { list, last } => { scan_mutated_expr(list, out); scan_mutated_expr(last, out); }
-        VaArg { list, .. } | VaEnd { list } => scan_mutated_expr(list, out),
-        VaCopy { dst, src } => { scan_mutated_expr(dst, out); scan_mutated_expr(src, out); }
-        _ => {}
+    }
+
+    fn decl(&mut self, d: &Decl) {
+        if let Decl::Var { declarators, .. } = d {
+            for d in declarators { if let Some(i) = &d.init { self.init(i); } }
+        }
+    }
+
+    pub(crate) fn stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Decl(d) => self.decl(d),
+            Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => self.expr(e),
+            Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => for s in ss { self.stmt(s); },
+            Stmt::If { cond, then, else_, .. } => {
+                self.expr(cond); self.stmt(then);
+                if let Some(e) = else_ { self.stmt(e); }
+            }
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => { self.expr(cond); self.stmt(body); }
+            Stmt::For { init, cond, post, body, .. } => {
+                match init {
+                    Some(ForInit::Expr(e)) => self.expr(e),
+                    Some(ForInit::Decl(d)) => self.decl(d),
+                    None => {}
+                }
+                if let Some(e) = cond { self.expr(e); }
+                if let Some(e) = post { self.expr(e); }
+                self.stmt(body);
+            }
+            Stmt::ForEach { iterable, body, .. } => { self.expr(iterable); self.stmt(body); }
+            Stmt::Switch { val, body, .. } => { self.expr(val); self.stmt(body); }
+            Stmt::Match { scrutinee, arms, .. } => { self.expr(scrutinee); for a in arms { self.stmt(&a.body); } }
+            Stmt::Guard { cond, else_body, .. } => { self.expr(cond); self.stmt(else_body); }
+            Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
+            | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => self.stmt(body),
+            Stmt::Asm(a) => {
+                for o in &a.outputs { self.escape(&o.expr); self.expr(&o.expr); }
+                for i in &a.inputs { self.expr(&i.expr); }
+            }
+            _ => {}
+        }
     }
 }
 
+/// The `moved` names of [`WriteScan`].
 fn scan_mutated_stmt(s: &Stmt, out: &mut sic_ir::fast_hash::HashSet<String>) {
-    match s {
-        Stmt::Decl(Decl::Var { declarators, .. }) => {
-            for d in declarators {
-                if let Some(Initializer::Expr(e)) = &d.init { scan_mutated_expr(e, out); }
-            }
-        }
-        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) => scan_mutated_expr(e, out),
-        Stmt::Block(ss, _) => for s in ss { scan_mutated_stmt(s, out); },
-        Stmt::If { cond, then, else_, .. } => {
-            scan_mutated_expr(cond, out); scan_mutated_stmt(then, out);
-            if let Some(e) = else_ { scan_mutated_stmt(e, out); }
-        }
-        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
-            scan_mutated_expr(cond, out); scan_mutated_stmt(body, out);
-        }
-        Stmt::For { init, cond, post, body, .. } => {
-            if let Some(ForInit::Expr(e)) = init { scan_mutated_expr(e, out); }
-            if let Some(ForInit::Decl(Decl::Var { declarators, .. })) = init {
-                for d in declarators { if let Some(Initializer::Expr(e)) = &d.init { scan_mutated_expr(e, out); } }
-            }
-            if let Some(e) = cond { scan_mutated_expr(e, out); }
-            if let Some(e) = post { scan_mutated_expr(e, out); }
-            scan_mutated_stmt(body, out);
-        }
-        Stmt::Switch { val, body, .. } => { scan_mutated_expr(val, out); scan_mutated_stmt(body, out); }
-        Stmt::Match { scrutinee, arms, .. } => {
-            scan_mutated_expr(scrutinee, out);
-            for a in arms { scan_mutated_stmt(&a.body, out); }
-        }
-        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
-        | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => scan_mutated_stmt(body, out),
-        Stmt::Delete(e, _) => scan_mutated_expr(e, out),
-        _ => {}
-    }
+    let mut scan = WriteScan::default();
+    scan.stmt(s);
+    out.extend(scan.moved);
 }
 
 // ── Fat-parameter propagation helpers (see Lowerer::infer_fat_params) ──────────

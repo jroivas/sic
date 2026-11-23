@@ -21,6 +21,29 @@ mod warnings;
 
 
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
+/// The object a pointer points into (sic.md §"Bounds"): its first byte and its
+/// size in bytes. `known` is false for a pointer local's remembered object,
+/// whose start is 0 when the local holds a raw pointer.
+pub(crate) struct ObjBounds {
+    pub(crate) lo: Val,
+    pub(crate) size: Val,
+    pub(crate) known: bool,
+}
+
+/// `e` names a place whose address can be computed again without side
+/// effects: variables, members, elements at side-effect-free indices.
+pub(crate) fn pure_place(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) | ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::CharLit(_) => true,
+        ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } => pure_place(base),
+        ExprKind::Index { base, index } => pure_place(base) && pure_place(index),
+        ExprKind::Unary { op: UnOpKind::Deref | UnOpKind::Neg | UnOpKind::BitNot, expr } => pure_place(expr),
+        ExprKind::Cast { expr, .. } => pure_place(expr),
+        ExprKind::BinOp { lhs, rhs, .. } => pure_place(lhs) && pure_place(rhs),
+        _ => false,
+    }
+}
+
 pub(crate) struct LValue {
     pub(crate) ptr: Val,
     ty: Type,    // type of the pointee
@@ -5132,11 +5155,24 @@ impl<'m> FuncCtx<'m> {
 
         // if idx >= count → __sic_bounds_fail()  (a negative index wraps to a huge
         // unsigned value, so the single unsigned compare catches it too).
+        self.emit_index_below(idx_u, count)
+    }
+
+    /// Stop the program unless the index `idx` (any integer) is below `count`
+    /// (a `usize`).
+    pub(crate) fn emit_index_below(&mut self, idx: Val, count: Val) -> Result<()> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let idx_u = self.coerce(idx, &usize_ty)?;
         let oob = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: oob, op: CmpOp::IUGe, lhs: idx_u, rhs: count, ty: usize_ty });
+        self.emit_bounds_fail_if(Val::Local(oob))
+    }
+
+    /// Branch to `__sic_bounds_fail()` when `oob` is true.
+    fn emit_bounds_fail_if(&mut self, oob: Val) -> Result<()> {
         let fail_bb = self.new_block_after_current();
         let ok_bb = self.new_block_after_current();
-        self.set_terminator(Terminator::CondJump { cond: Val::Local(oob), then_bb: fail_bb, else_bb: ok_bb });
+        self.set_terminator(Terminator::CondJump { cond: oob, then_bb: fail_bb, else_bb: ok_bb });
         self.switch_to_block(fail_bb);
         let fref = self.lowerer.ensure_bounds_fail_fn();
         self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
@@ -5149,6 +5185,267 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// `name` is, in this scope, a local whose slot is a checkable fat pointer.
+    pub(crate) fn is_fat_local(&self, name: &str) -> bool {
+        matches!(self.lookup(name), Some(LookupResult::Local(_, vid)) if self.fat_locals.contains(&vid))
+    }
+
+    /// Whether a SIC pointer local of type `ty` tracks the object it points into:
+    /// a plain data pointer, not one of the built-in handles (string, tuple, any,
+    /// containers, …), which are never indexed as memory.
+    pub(crate) fn tracks_bounds(&self, ty: &Type) -> bool {
+        use super::types as t;
+        matches!(ty, Type::Pointer(inner) if !matches!(inner.as_ref(), Type::Function(_)))
+            && !(t::is_sic_string(ty) || t::is_tuple(ty) || t::is_fixed(ty) || t::is_bigint(ty)
+                || t::is_dict(ty) || t::is_list(ty) || t::is_set(ty) || t::is_va_array(ty)
+                || t::is_any(ty) || t::is_u8char(ty) || t::is_type_info(ty) || self.is_builtin_handle(ty))
+    }
+
+    /// Give the pointer local in `slot` its object slots (start, byte size),
+    /// starting as "not known".
+    pub(crate) fn new_ptr_bounds(&mut self, slot: ValId) {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let lo = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: lo, ty: Type::char_ptr(), align: None });
+        let null = self.coerce(Constant::zero(), &Type::char_ptr()).unwrap_or(Constant::zero());
+        self.push_instr(Instr::Store { val: null, ptr: Val::Local(lo) });
+        let size = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: size, ty: usize_ty.clone(), align: None });
+        let zero = self.coerce(Constant::uint(0), &usize_ty).unwrap_or(Constant::uint(0));
+        self.push_instr(Instr::Store { val: zero, ptr: Val::Local(size) });
+        self.ptr_bounds.insert(slot, (lo, size));
+    }
+
+    /// The pointer local in `slot` (of type `ty`) was just set to the value of `e`:
+    /// record the object that value points into.
+    pub(crate) fn set_ptr_bounds(&mut self, slot: ValId, ty: &Type, e: &Expr) -> Result<()> {
+        let Some(&(lo_slot, size_slot)) = self.ptr_bounds.get(&slot) else { return Ok(()) };
+        let v = self.alloc_val();
+        self.push_instr(Instr::Load { dest: v, ptr: Val::Local(slot), ty: ty.clone() });
+        self.val_types.insert(v.0, ty.clone());
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let (lo, size) = match self.expr_bounds(e, Some(Val::Local(v)))? {
+            Some(b) => (b.lo, b.size),
+            None => (self.coerce(Constant::zero(), &Type::char_ptr())?, self.coerce(Constant::uint(0), &usize_ty)?),
+        };
+        self.push_instr(Instr::Store { val: lo, ptr: Val::Local(lo_slot) });
+        self.push_instr(Instr::Store { val: size, ptr: Val::Local(size_slot) });
+        Ok(())
+    }
+
+    /// The object (start, byte size) the pointer value of `e` points into, when
+    /// the program says (sic.md §"Bounds"): a `new` allocation, an array, `&x`,
+    /// or a pointer local that remembers one — through casts and `p ± n`.
+    /// `val` is `e`'s value when the caller already has it; otherwise only a
+    /// side-effect-free `e` is evaluated again. `None`: not known (a raw pointer).
+    pub(crate) fn expr_bounds(&mut self, e: &Expr, val: Option<Val>) -> Result<Option<ObjBounds>> {
+        use ExprKind as E;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        match &e.kind {
+            E::Ident(n) => {
+                if let Some(LookupResult::Local(_, vid)) = self.lookup(n) {
+                    if self.fat_locals.contains(&vid) {
+                        let v = match val { Some(v) => v, None => self.lower_expr(e)? };
+                        return self.header_bounds(v).map(Some);
+                    }
+                    if let Some(&(lo_slot, size_slot)) = self.ptr_bounds.get(&vid) {
+                        let lo = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: lo, ptr: Val::Local(lo_slot), ty: Type::char_ptr() });
+                        let size = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: size, ptr: Val::Local(size_slot), ty: usize_ty.clone() });
+                        return Ok(Some(ObjBounds { lo: Val::Local(lo), size: Val::Local(size), known: false }));
+                    }
+                    if let Some(&size_slot) = self.vla_sizes.get(&vid) {
+                        let v = match val { Some(v) => v, None => self.lower_expr(e)? };
+                        let lo = self.coerce(v, &Type::char_ptr())?;
+                        let size = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: size, ptr: Val::Local(size_slot), ty: Type::i64() });
+                        let size = self.coerce(Val::Local(size), &usize_ty)?;
+                        return Ok(Some(ObjBounds { lo, size, known: true }));
+                    }
+                }
+            }
+            // A fresh allocation: its header has the size.
+            E::New { .. } => {
+                let ty = self.infer_expr_type(e).ok();
+                let container = ty.as_ref().is_some_and(|t| super::types::is_list(t)
+                    || super::types::is_dict(t) || super::types::is_set(t));
+                return match val {
+                    Some(v) if !container => self.header_bounds(v).map(Some),
+                    _ => Ok(None),
+                };
+            }
+            E::Cast { expr, .. } => {
+                if matches!(self.infer_expr_type(e), Ok(Type::Pointer(_)))
+                    && matches!(self.infer_expr_type(expr), Ok(Type::Pointer(_) | Type::Array { .. }))
+                {
+                    return self.expr_bounds(expr, val);
+                }
+                return Ok(None);
+            }
+            E::BinOp { op: BinOpKind::Add | BinOpKind::Sub, lhs, rhs } => {
+                let is_ptr = |s: &mut Self, x: &Expr| matches!(s.infer_expr_type(x), Ok(Type::Pointer(_) | Type::Array { .. }));
+                if is_ptr(self, lhs) && !is_ptr(self, rhs) { return self.expr_bounds(lhs, None); }
+                if is_ptr(self, rhs) && !is_ptr(self, lhs) { return self.expr_bounds(rhs, None); }
+                return Ok(None);
+            }
+            E::Unary { op: UnOpKind::Addr, expr } => return self.addr_bounds(expr, val),
+            E::Comma(_, r) => return self.expr_bounds(r, val),
+            // `p++`, `--p`, `p = q`, `p += n`: the variable's own object, as it is
+            // after the update.
+            E::PreInc { expr, .. } | E::PostInc { expr, .. } | E::Assign { lhs: expr, .. }
+                if matches!(expr.kind, E::Ident(_)) => return self.expr_bounds(expr, None),
+            _ => {}
+        }
+        // An array object (decaying to a pointer to its first element).
+        if let Ok(Type::Array { elem, len }) = self.infer_expr_type(e) {
+            if len > 0 && !self.is_trailing_array_member(e) && (val.is_some() || pure_place(e)) {
+                let v = match val { Some(v) => v, None => self.lower_expr(e)? };
+                let lo = self.coerce(v, &Type::char_ptr())?;
+                let esz = super::types::resolve_aggregate(&elem, &self.lowerer.struct_types).size_of(self.ptr_size());
+                let size = self.coerce(Constant::uint(len as u64 * esz), &usize_ty)?;
+                return Ok(Some(ObjBounds { lo, size, known: true }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The object `&x` points into.
+    fn addr_bounds(&mut self, x: &Expr, val: Option<Val>) -> Result<Option<ObjBounds>> {
+        use ExprKind as E;
+        match &x.kind {
+            // `&a[i]` / `&*p`: the object `a` / `p` points into.
+            E::Index { base, index } => {
+                let base = if self.index_operands_reversed(base, index) { index } else { base };
+                self.expr_bounds(base, None)
+            }
+            E::Unary { op: UnOpKind::Deref, expr } => self.expr_bounds(expr, None),
+            // `&x`, `&s.f`, `&p->f`: that object alone.
+            E::Ident(_) | E::Field { .. } | E::Arrow { .. } => {
+                if matches!(x.kind, E::Ident(_)) && !matches!(self.lookup_ident_kind(x), Some(true)) {
+                    return Ok(None);
+                }
+                if self.is_trailing_array_member(x) { return Ok(None); }
+                let Ok(ty) = self.infer_expr_type(x) else { return Ok(None) };
+                let ty = super::types::resolve_aggregate(&ty, &self.lowerer.struct_types);
+                let size = ty.size_of(self.ptr_size());
+                if size == 0 || matches!(ty, Type::Function(_)) { return Ok(None); }
+                let v = match val {
+                    Some(v) => v,
+                    None if pure_place(x) => self.lvalue_addr(x)?,
+                    None => return Ok(None),
+                };
+                let lo = self.coerce(v, &Type::char_ptr())?;
+                let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                let size = self.coerce(Constant::uint(size), &usize_ty)?;
+                Ok(Some(ObjBounds { lo, size, known: true }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The address of the place `x`, as `&x` computes it (not an access).
+    fn lvalue_addr(&mut self, x: &Expr) -> Result<Val> {
+        let prev = std::mem::replace(&mut self.addr_only, true);
+        let lv = self.lower_lvalue(x);
+        self.addr_only = prev;
+        Ok(lv?.ptr)
+    }
+
+    /// `Some(true)` when the identifier `x` names a variable (local or global),
+    /// not a function or enum constant.
+    fn lookup_ident_kind(&self, x: &Expr) -> Option<bool> {
+        let ExprKind::Ident(n) = &x.kind else { return None };
+        Some(matches!(self.lookup(n), Some(LookupResult::Local(..) | LookupResult::Global(..))))
+    }
+
+    /// The bounds of a `new` allocation whose data starts at `v`: the size is
+    /// in the header at `v - 2*ptr` (see `emit_bounds_check`).
+    fn header_bounds(&mut self, v: Val) -> Result<ObjBounds> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let lo = self.coerce(v, &Type::char_ptr())?;
+        let szp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: szp, base: lo.clone(), index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
+        let size = self.alloc_val();
+        self.push_instr(Instr::LoadReadonly { dest: size, ptr: Val::Local(szp), ty: usize_ty });
+        Ok(ObjBounds { lo, size: Val::Local(size), known: true })
+    }
+
+    /// A struct's last member declared as an array of 0 or 1 elements: the C
+    /// idiom for data that continues past the struct (a flexible array), so its
+    /// declared length is not its bound.
+    pub(crate) fn is_trailing_array_member(&self, e: &Expr) -> bool {
+        let (base, name, arrow) = match &e.kind {
+            ExprKind::Field { base, name } => (base, name, self.field_auto_derefs(base)),
+            ExprKind::Arrow { base, name } => (base, name, true),
+            _ => return false,
+        };
+        let Ok(mut t) = self.infer_expr_type(base) else { return false };
+        if arrow {
+            match t {
+                Type::Pointer(p) => t = *p,
+                Type::Array { elem, .. } => t = *elem,
+                _ => return false,
+            }
+        }
+        let Type::Struct(st) = super::types::resolve_aggregate(&t, &self.lowerer.struct_types) else { return false };
+        matches!(st.fields.last(), Some((n, Type::Array { len, .. })) if n == name && *len <= 1)
+    }
+
+    /// sic (sic.md §"Bounds"): the `*p` access of a `ty` at `ptr` (the value of
+    /// `p`) lies in the object `p` points into. A function or an array is not
+    /// read (it decays), and nothing is read through a built-in handle.
+    pub(crate) fn check_deref(&mut self, p: &Expr, ptr: &Val, ty: &Type) -> Result<()> {
+        if !self.is_sic() || matches!(ty, Type::Function(_) | Type::Array { .. } | Type::Void) { return Ok(()); }
+        if !self.tracks_bounds(&self.val_type(ptr)) && !matches!(self.infer_expr_type(p), Ok(Type::Array { .. })) {
+            return Ok(());
+        }
+        if let Some(b) = self.expr_bounds(p, Some(ptr.clone()))? {
+            let size = ty.size_of(self.ptr_size());
+            self.emit_range_check(ptr.clone(), size, b)?;
+        }
+        Ok(())
+    }
+
+    /// Stop the program unless the `size`-byte access at `addr` lies inside `b`.
+    /// An object that is not known at run time (start 0) is not checked.
+    pub(crate) fn emit_range_check(&mut self, addr: Val, size: u64, b: ObjBounds) -> Result<()> {
+        if size == 0 { return Ok(()); }
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let to_int = |s: &mut Self, v: Val| -> Result<Val> {
+            let p = s.coerce(v, &Type::char_ptr())?;
+            let d = s.alloc_val();
+            s.push_instr(Instr::Cast { dest: d, op: CastOp::PtrToInt, val: p, to_ty: usize_ty.clone() });
+            s.val_types.insert(d.0, usize_ty.clone());
+            Ok(Val::Local(d))
+        };
+        let a = to_int(self, addr)?;
+        let lo = to_int(self, b.lo)?;
+        // off = addr - lo; out of bounds when off > size or size - off < access.
+        let bin = |s: &mut Self, op: BinOp, l: Val, r: Val, ty: &Type| -> Val {
+            let d = s.alloc_val();
+            s.push_instr(Instr::BinOp { dest: d, op, lhs: l, rhs: r, ty: ty.clone() });
+            Val::Local(d)
+        };
+        let cmp = |s: &mut Self, op: CmpOp, l: Val, r: Val| -> Val {
+            let d = s.alloc_val();
+            s.push_instr(Instr::Cmp { dest: d, op, lhs: l, rhs: r, ty: usize_ty.clone() });
+            Val::Local(d)
+        };
+        let off = bin(self, BinOp::Sub, a, lo.clone(), &usize_ty);
+        let past = cmp(self, CmpOp::IUGt, off.clone(), b.size.clone());
+        let room = bin(self, BinOp::Sub, b.size, off, &usize_ty);
+        let asz = self.coerce(Constant::uint(size), &usize_ty)?;
+        let short = cmp(self, CmpOp::IULt, room, asz);
+        let mut oob = bin(self, BinOp::Or, past, short, &Type::Bool);
+        if !b.known {
+            let zero = self.coerce(Constant::uint(0), &usize_ty)?;
+            let tracked = cmp(self, CmpOp::INe, lo, zero);
+            oob = bin(self, BinOp::And, oob, tracked, &Type::Bool);
+        }
+        self.emit_bounds_fail_if(oob)
+    }
+
     /// sic `@expr` / `@mut expr` (sic.md §"References"): retain the referent's
     /// allocation and register a scope-exit release, so it stays alive for the
     /// enclosing scope. The reference value is the referent pointer.
@@ -5158,7 +5455,7 @@ impl<'m> FuncCtx<'m> {
         // memory) has no header — the count would be written into whatever lies
         // there, and the last release would `free` memory never allocated.
         let fat = match &expr.kind {
-            ExprKind::Ident(n) => self.fat_locals.contains(n),
+            ExprKind::Ident(n) => self.is_fat_local(n),
             ExprKind::New { .. } => true,
             _ => false,
         };
@@ -6314,7 +6611,20 @@ impl<'m> FuncCtx<'m> {
                 }
             }
         }
-        self.lower_assign_inner(op, lhs, rhs)
+        let r = self.lower_assign_inner(op, lhs, rhs)?;
+        // `p = e` moves a pointer local to the object `e` points into; `p += n`
+        // stays in its object (sic.md §"Bounds").
+        if op.is_none() && self.is_sic() {
+            if let ExprKind::Ident(n) = &lhs.kind {
+                if let Some(LookupResult::Local(ty, vid)) = self.lookup(n) {
+                    if self.ptr_bounds.contains_key(&vid) {
+                        let ty = ty.clone();
+                        self.set_ptr_bounds(vid, &ty, rhs)?;
+                    }
+                }
+            }
+        }
+        Ok(r)
     }
 
     fn lower_assign_inner(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -6921,8 +7231,8 @@ impl<'m> FuncCtx<'m> {
                 }
                 // Remember the escape: a call may now change this variable.
                 if let ExprKind::Ident(n) = &inner.kind { self.addr_taken.insert(n.clone()); }
-                let lv = self.lower_lvalue(inner)?;
-                Ok(lv.ptr)
+                let lv = self.lvalue_addr(inner)?;
+                Ok(lv)
             }
             UnOpKind::Deref => {
                 let mut ptr = self.lower_expr(inner)?;
@@ -6953,6 +7263,7 @@ impl<'m> FuncCtx<'m> {
                 if matches!(inner_ty, Type::Function(_) | Type::Array { .. }) {
                     return Ok(ptr);
                 }
+                self.check_deref(inner, &ptr, &inner_ty)?;
                 if let Some(p) = self.any_by_address(&ptr, &inner_ty) { return Ok(p); }
                 let dest = self.alloc_val();
                 self.push_instr(Instr::Load { dest, ptr, ty: inner_ty });

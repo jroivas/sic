@@ -140,6 +140,22 @@
 
 ### SIC
 
+- **Bounds** (sic.md §"Bounds"): an access stays in the object its pointer was
+  formed from, or the program stops ("sic: out-of-bounds access"). Only
+  `name[i]` on a `new` variable was checked. Now these are checked too:
+  - indexing a local, global or member array;
+  - a pointer formed from a `new` allocation, an array or `&x` (`a + k`,
+    `&a[k]`, casts), through `*p`, `p[i]` and `p->field`;
+  - a pointer local assigned any of those.
+
+  Raw pointers (from C, `malloc`, a non-`static` function's parameters) are
+  not checked. Fixed along the way:
+  - a `new` array moved inside `unsafe { }`, a `for (x : xs)`, a `guard` or
+    `asm` was still checked against a size read from the wrong place;
+  - an inner variable with the name of a `new` array was checked as that
+    array;
+  - a method's pointer parameters, `self` among them, were taken for `new`
+    allocations when a stack object was passed.
 - Closures: a plain function is wrapped where a closure is wanted; a lambda's
   result type comes from its `Fn`.
 - Constants fold at every level, strings and ternaries too.
