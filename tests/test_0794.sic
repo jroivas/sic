@@ -1,0 +1,11 @@
+// SIC bounds (sic.md §"Bounds"): a counting loop over an array is checked once,
+// before it runs, against the array's length; a loop that would pass the end
+// stops the program before its first iteration. Exit 134 (abort).
+int main() {
+    int w[16];
+    int n = 20;
+    int s = 0;
+    for (int t = 0; t < n; t++) w[t] = t;
+    for (int t = 4; t < 16; t++) s += w[t - 4];
+    return s;
+}

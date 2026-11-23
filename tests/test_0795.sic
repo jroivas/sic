@@ -1,0 +1,10 @@
+// SIC bounds (sic.md §"Bounds"): counting loops whose indexes stay inside an
+// array run, with the check made once before each loop. Returns 42.
+int main() {
+    int w[64];
+    for (int t = 0; t < 16; t++) w[t] = t;
+    for (int t = 16; t < 64; t++) w[t] = w[t - 16] + w[t - 7] - w[t - 2] + 1;
+    int s = 0;
+    for (int t = 0; t < 64; t += 8) s += w[t] % 7;
+    return s == 3 ? 42 : 100 + s;
+}

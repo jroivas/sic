@@ -5204,6 +5204,16 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// sic: the length `N` of `e` when `e` is an array object `T a[N]` whose
+    /// index is checked against it (sic.md §"Bounds").
+    pub(crate) fn array_len(&self, e: &Expr) -> Option<u64> {
+        if !self.is_sic() { return None; }
+        match self.infer_expr_type(e) {
+            Ok(Type::Array { len, .. }) if len > 0 && !self.is_trailing_array_member(e) => Some(len as u64),
+            _ => None,
+        }
+    }
+
     /// Whether a SIC pointer local of type `ty` tracks the object it points into:
     /// a plain data pointer, not one of the built-in handles (string, tuple, any,
     /// containers, …), which are never indexed as memory.

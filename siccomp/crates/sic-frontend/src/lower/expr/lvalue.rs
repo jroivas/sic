@@ -446,19 +446,20 @@ impl<'m> FuncCtx<'m> {
         // sic bounds checks (sic.md §"Bounds"). The object a pointer points into
         // is checked after the address is computed, below.
         let mut range: Option<ObjBounds> = None;
-        if self.is_sic() && !addr_only {
+        // Loop bounds-check elimination skips the per-access check when an
+        // enclosing counting loop already proved this exact `arr[index]`
+        // in-bounds via a hoisted check on the loop's index extremes.
+        let proven = matches!(&base.kind, ExprKind::Ident(name) if {
+            let key = super::super::func::bce_index_key(index);
+            self.bce_proven.iter().any(|(a, k)| a == name && *k == key)
+        });
+        if self.is_sic() && !addr_only && !proven {
             let fat = matches!(&base.kind, ExprKind::Ident(name) if self.is_fat_local(name));
             let logical = self.infer_expr_type(base).ok();
             if fat {
                 // `name[i]` where `name` is a never-moved `new`/`@` pointer:
-                // verify `i*elem_size < header.size`. Loop bounds-check
-                // elimination skips the per-access check when an enclosing
-                // counting loop already proved this exact `arr[index]` in-bounds
-                // via a hoisted check on the loop's index extremes.
-                let ExprKind::Ident(name) = &base.kind else { unreachable!() };
-                let proven = { let key = super::super::func::bce_index_key(index);
-                    self.bce_proven.iter().any(|(a, k)| a == name && *k == key) };
-                if !proven {
+                // verify `i*elem_size < header.size`.
+                {
                     let elem = match &base_ty {
                         Type::Pointer(t) => super::super::types::resolve_aggregate(t, &self.lowerer.struct_types),
                         _ => Type::i32(),

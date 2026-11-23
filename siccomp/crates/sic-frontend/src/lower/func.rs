@@ -6266,7 +6266,16 @@ impl<'m> FuncCtx<'m> {
 
     /// Emit one hoisted fat-pointer bounds check `arr[idx]` (used by loop-BCE).
     fn emit_hoisted_bounds_check(&mut self, arr: &str, idx: &Expr) -> Result<()> {
-        let base = self.lower_expr(&Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), idx.span.clone()))?;
+        let arr_e = Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), idx.span.clone());
+        // An array `T a[N]` (sic.md §"Bounds"): the index is below N.
+        if let Some(n) = self.array_len(&arr_e) {
+            let iv = self.lower_expr(idx)?;
+            let iv = self.coerce(iv, &Type::i64())?;
+            let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+            let n = self.coerce(Constant::uint(n), &usize_ty)?;
+            return self.emit_index_below(iv, n);
+        }
+        let base = self.lower_expr(&arr_e)?;
         let bt = self.val_type(&base);
         let elem = match &bt {
             Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
@@ -6363,7 +6372,7 @@ impl<'m> FuncCtx<'m> {
                 // Record a fat-pointer affine access; always recurse to catch nested
                 // accesses / assignments inside the index or base.
                 if let E::Ident(arr) = &base.kind {
-                    if self.is_fat_local(arr) {
+                    if self.is_fat_local(arr) || self.array_len(base).is_some() {
                         if let Some(x) = affine_x(index, ivar) {
                             out.push((arr.clone(), (**index).clone(), x));
                         }
