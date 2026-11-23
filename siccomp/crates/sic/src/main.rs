@@ -1475,6 +1475,20 @@ fn function_sections(args: &Args) -> bool {
     !matches!(args.f_options.get("function-sections"), Some(FOption::Disabled))
 }
 
+/// `-falign-functions=N` (GCC's `N:M:…`: only N counts), rounded up to a power
+/// of two; `-fno-align-functions` is 1. A bare `-falign-functions` or N = 0
+/// leaves it to the back end.
+fn function_align(args: &Args) -> Option<u32> {
+    match args.f_options.get("align-functions")? {
+        FOption::Disabled => Some(1),
+        FOption::Enabled => None,
+        FOption::Value(v) => match v.split(':').next()?.parse::<u32>().ok()? {
+            0 => None,
+            n => Some(n.min(4096).next_power_of_two()),
+        },
+    }
+}
+
 /// Codegen a lowered IR module to object-file bytes.
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
@@ -1512,6 +1526,7 @@ fn compile_ir_output(ir_module: &sic_ir::Module, args: &Args, assembly: bool) ->
         no_red_zone: args.machine_flags.iter().rev()
             .find(|m| *m == "-mno-red-zone" || *m == "-mred-zone").is_some_and(|m| m == "-mno-red-zone"),
         features: isa.backend_features().into_iter().map(String::from).collect(),
+        function_align: function_align(args),
         mitigations: mitigations(args),
         ..BackendOptions::default()
     };

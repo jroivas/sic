@@ -18,6 +18,10 @@
   run time with `-fbackend=` or `$SIC_BACKEND`; `-print-backends` lists them. The
   first one given to `--backend` is the default. See [doc/backends.md](doc/backends.md).
 - `--version`, `.comment` and `DW_AT_producer` name the back end that compiled.
+- `-falign-functions=N` (and `-fno-align-functions`) on both back ends.
+  Cranelift starts every function on a 64-byte boundary at `-O2`/`-O3`, so a
+  hot loop's speed no longer depends on how much code precedes its function
+  (`lz` 1.40 → 1.07 s, `fib` 0.45 → 0.39 s; about 4% more code).
 - LLVM: `-g` (DWARF lines, functions, parameters, locals and their types).
 - LLVM: inline assembly is LLVM's own on x86-64 too (not sic's out-of-line
   helpers, whose plain `ret`s objtool reported under return thunks);

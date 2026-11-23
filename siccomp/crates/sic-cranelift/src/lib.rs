@@ -99,6 +99,15 @@ fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, 
     // (`__builtin_return_address(0)` / QEMU's GETPC()) requires it.
     let _ = debug_info;
     flag_builder.set("preserve_frame_pointers", "true").unwrap();
+    // Functions start on a 64-byte boundary when optimizing for speed: the CPU
+    // fetches and caches code in 64-byte blocks, and a hot loop's speed
+    // otherwise depends on how much code happens to come before its function
+    // (up to 30% either way). The padding is never executed; it costs about 4%
+    // of code size. `-falign-functions=N` overrides it.
+    let align = cfg.function_align.or(if cfg.opt == OptLevel::Speed { Some(64) } else { None });
+    if let Some(a) = align {
+        flag_builder.set("log2_min_function_alignment", &a.trailing_zeros().to_string()).unwrap();
+    }
     let flags = settings::Flags::new(flag_builder.clone());
 
     // The host's architecture with only the requested extensions.

@@ -52,6 +52,10 @@ pub struct BackendOptions {
     /// The x64 extensions the code may use, from `-march`/`-m…`, by GCC's names
     /// (`sse4.2`, `popcnt`, `avx2`): nothing of the build machine's CPU beyond them.
     pub features: Vec<String>,
+    /// `-falign-functions=N`: every function starts on an N-byte boundary (a
+    /// power of two; 1: no more than the back end needs). None: the back end's
+    /// choice.
+    pub function_align: Option<u32>,
     /// Linux's mitigation and hardening options (what [`Backend::mitigations`]
     /// says the back end does).
     pub mitigations: Mitigations,
@@ -103,7 +107,7 @@ impl Default for BackendOptions {
     fn default() -> Self {
         BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true, pie: true, assembly: false,
             function_sections: true, sse: true, x87: true, no_text_data: false, no_red_zone: false, features: Vec::new(),
-            mitigations: Mitigations::default() }
+            function_align: None, mitigations: Mitigations::default() }
     }
 }
 

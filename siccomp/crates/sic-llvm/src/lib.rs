@@ -269,6 +269,8 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
             None if cx.opts.function_sections => lf.as_global_value().set_section(Some(&format!(".text.{}", f.name))),
             None => {}
         }
+        // `-falign-functions=N` (LLVM's own default is 16).
+        if let Some(a) = cx.opts.function_align { lf.as_global_value().set_alignment(a); }
         if ir.hidden_symbols.contains(&f.name) && lf.get_linkage() != LLinkage::Internal {
             lf.as_global_value().set_visibility(GlobalVisibility::Hidden);
         }
