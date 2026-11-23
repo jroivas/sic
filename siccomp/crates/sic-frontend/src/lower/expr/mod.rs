@@ -5190,6 +5190,20 @@ impl<'m> FuncCtx<'m> {
         matches!(self.lookup(name), Some(LookupResult::Local(_, vid)) if self.fat_locals.contains(&vid))
     }
 
+    /// sic: indexing the variable `name` is bounds-checked (sic.md §"Bounds"), but
+    /// not by a fat pointer's header: an array, or a pointer local that remembers
+    /// its object. Code that replaces the per-access checks must check it itself.
+    pub(crate) fn checked_without_header(&self, name: &str) -> bool {
+        if !self.is_sic() { return false; }
+        match self.lookup(name) {
+            Some(LookupResult::Local(ty, vid)) => !self.fat_locals.contains(&vid)
+                && (self.ptr_bounds.contains_key(&vid) || self.vla_sizes.contains_key(&vid)
+                    || matches!(ty, Type::Array { .. })),
+            Some(LookupResult::Global(ty, _)) => matches!(ty, Type::Array { .. }),
+            _ => false,
+        }
+    }
+
     /// Whether a SIC pointer local of type `ty` tracks the object it points into:
     /// a plain data pointer, not one of the built-in handles (string, tuple, any,
     /// containers, …), which are never indexed as memory.

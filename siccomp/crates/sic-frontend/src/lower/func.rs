@@ -5636,6 +5636,9 @@ impl<'m> FuncCtx<'m> {
                 if key != woff_key { return Ok(false); }
             }
         }
+        // An array checked by other means than its `new` header (sic.md
+        // §"Bounds") keeps its scalar loop, which checks each access.
+        if accesses.iter().any(|(arr, _)| self.checked_without_header(arr)) { return Ok(false); }
 
         // ===== EMIT =====
         // Promote the induction variable to i64 for the vector loop so the
@@ -5932,6 +5935,10 @@ impl<'m> FuncCtx<'m> {
             (B::Eq, _) => CmpOp::IEq, (B::Ne, _) => CmpOp::INe,
             _ => return Ok(false),
         };
+
+        // An array checked by other means than its `new` header (sic.md
+        // §"Bounds") keeps its scalar loop, which checks each access.
+        if self.checked_without_header(&arr) { return Ok(false); }
 
         // ===== EMIT ===== (mirrors `try_vectorize`'s scaffolding)
         let i64_ty = QualType::new(AstType::LongLong { signed: true });
