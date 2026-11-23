@@ -1,0 +1,14 @@
+// SIC bounds (sic.md §"Bounds"): pointers that only ever hold `new`
+// allocations, swapped every round, are checked against the allocation each
+// holds: after the swap `cur` is the 4-element one, so `cur[5]` stops the
+// program. Exit 134 (abort).
+int main() {
+    int *cur = new int[8];
+    int *nxt = new int[4];
+    int s = 0;
+    for (int r = 0; r < 2; r++) {
+        for (int i = 0; i < 6; i++) s += cur[i];
+        int *tmp = cur; cur = nxt; nxt = tmp;
+    }
+    return s;
+}

@@ -426,6 +426,9 @@ pub struct FuncCtx<'m> {
     /// taken, swapped, unpacked into, an `asm` output. Such a pointer gets no
     /// `ptr_bounds` (a write would bypass them).
     pub escaped_names: sic_ir::fast_hash::HashSet<String>,
+    /// Pre-scanned names that only ever hold the start of a `new` allocation
+    /// ([`WriteScan::bases`]): checkable through the header though reassigned.
+    pub base_names: sic_ir::fast_hash::HashSet<String>,
     /// Set while lowering the operand of `&`: the outermost access (`&p[i]`,
     /// `&*p`, `&p->f`) takes it on entry. Forming an address is not an access,
     /// so that one is not bounds-checked (`&a[N]` is the end of `a`).
@@ -583,6 +586,7 @@ impl<'m> FuncCtx<'m> {
             fat_locals: sic_ir::fast_hash::HashSet::default(),
             ptr_bounds: HashMap::default(),
             escaped_names: sic_ir::fast_hash::HashSet::default(),
+            base_names: sic_ir::fast_hash::HashSet::default(),
             addr_only: false,
             vla_sizes: HashMap::default(),
             borrowing_closures: HashMap::default(),
@@ -2925,7 +2929,9 @@ impl<'m> Lowerer {
         // never-moved `new`/`@` pointers are treated as checkable fat pointers.
         if fc.is_sic() {
             let mut scan = WriteScan::default();
+            for p in params.iter() { if let Some(n) = &p.name { scan.param(n); } }
             for s in body { scan.stmt(s); }
+            fc.base_names = scan.bases();
             fc.moved_names = scan.moved;
             fc.escaped_names = scan.escaped;
         }
@@ -4044,6 +4050,12 @@ impl<'m> FuncCtx<'m> {
                             self.fat_locals.insert(vid);
                             fat = true;
                         }
+                    }
+                    if self.is_sic() && !fat && !is_container && self.base_names.contains(&d.name)
+                        && matches!(ty, Type::Pointer(_))
+                    {
+                        self.fat_locals.insert(vid);
+                        fat = true;
                     }
                     // Any other pointer local remembers the object its value points
                     // into, from the initializer on (sic.md §"Bounds").
@@ -7687,32 +7699,84 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
 ///   * `escaped`: written other than by `=`, `op=`, `++`/`--` (address taken,
 ///     swapped, unpacked into, an `asm` output). A pointer in this set has no
 ///     `ptr_bounds`: such a write would bypass them.
+///   * `sources`: what each name is given, by its declarations and `=`
+///     assignments; see [`WriteScan::bases`].
 /// Names, not variables: a name is in a set if any variable of that name is.
 /// Every statement and expression is entered, lambda bodies included.
 #[derive(Default)]
 pub(crate) struct WriteScan {
     pub(crate) moved: sic_ir::fast_hash::HashSet<String>,
     pub(crate) escaped: sic_ir::fast_hash::HashSet<String>,
+    sources: HashMap<String, Vec<Source>>,
+}
+
+/// A value a name is given (see [`WriteScan`]).
+enum Source {
+    /// A `new` allocation (its start).
+    New,
+    /// The value of another name.
+    Name(String),
+    /// Anything else: another value, `p += n`, `p++`, an uninitialized
+    /// declaration, a write the scan cannot follow.
+    Other,
 }
 
 impl WriteScan {
     fn escape(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Ident(n) => { self.moved.insert(n.clone()); self.escaped.insert(n.clone()); }
+            ExprKind::Ident(n) => {
+                self.moved.insert(n.clone());
+                self.escaped.insert(n.clone());
+                self.give(n, Source::Other);
+            }
             ExprKind::TupleExpr(xs) => for x in xs { self.escape(x); },
             _ => {}
+        }
+    }
+
+    fn give(&mut self, n: &str, s: Source) {
+        self.sources.entry(n.to_string()).or_default().push(s);
+    }
+
+    fn source(e: &Expr) -> Source {
+        match &e.kind {
+            ExprKind::New { .. } => Source::New,
+            ExprKind::Ident(m) => Source::Name(m.clone()),
+            ExprKind::Cast { expr, .. } => Self::source(expr),
+            _ => Source::Other,
+        }
+    }
+
+    /// The names that only ever hold the start of a `new` allocation: every
+    /// declaration of the name is initialized, and every value it is given is
+    /// `new …` or another such name (`tmp = cur; cur = nxt; nxt = tmp;`).
+    pub(crate) fn bases(&self) -> sic_ir::fast_hash::HashSet<String> {
+        let mut set: sic_ir::fast_hash::HashSet<String> = self.sources.iter()
+            .filter(|(_, v)| v.iter().all(|s| !matches!(s, Source::Other)))
+            .map(|(n, _)| n.clone()).collect();
+        loop {
+            let drop: Vec<String> = set.iter().filter(|n| self.sources[*n].iter()
+                .any(|s| matches!(s, Source::Name(m) if !set.contains(m)))).cloned().collect();
+            if drop.is_empty() { return set; }
+            for n in drop { set.remove(&n); }
         }
     }
 
     pub(crate) fn expr(&mut self, e: &Expr) {
         use ExprKind::*;
         match &e.kind {
-            Assign { lhs, .. } => match &lhs.kind {
-                Ident(n) => { self.moved.insert(n.clone()); }
+            Assign { op, lhs, rhs } => match &lhs.kind {
+                Ident(n) => {
+                    self.moved.insert(n.clone());
+                    let s = if op.is_none() { Self::source(rhs) } else { Source::Other };
+                    self.give(n, s);
+                }
                 TupleExpr(_) => self.escape(lhs),
                 _ => {}
             },
-            PreInc { expr, .. } | PostInc { expr, .. } => { if let Ident(n) = &expr.kind { self.moved.insert(n.clone()); } }
+            PreInc { expr, .. } | PostInc { expr, .. } => {
+                if let Ident(n) = &expr.kind { self.moved.insert(n.clone()); self.give(n, Source::Other); }
+            }
             Unary { op: crate::ast::UnOpKind::Addr, expr } => self.escape(expr),
             Swap { lhs, rhs } => { self.escape(lhs); self.escape(rhs); }
             _ => {}
@@ -7737,13 +7801,27 @@ impl WriteScan {
                 if let Some(x) = lo { self.expr(x); }
                 if let Some(x) = hi { self.expr(x); }
             }
-            Match { scrutinee, arms } => { self.expr(scrutinee); for a in arms { self.stmt(&a.body); } }
+            Match { scrutinee, arms } => { self.expr(scrutinee); self.arms(arms); }
             Generic { controlling, assocs } => { self.expr(controlling); for (_, x) in assocs { self.expr(x); } }
             CompoundLiteral { init, .. } => for it in init { self.init(&it.init); },
-            StmtExpr(v) | Guard { body: v, .. } | Lambda { body: v, .. } => for s in v { self.stmt(s); },
+            Lambda { params, body, .. } => {
+                for p in params { if let Some(n) = &p.name { self.give(n, Source::Other); } }
+                for s in body { self.stmt(s); }
+            }
+            StmtExpr(v) | Guard { body: v, .. } => for s in v { self.stmt(s); },
             _ => {}
         }
     }
+
+    fn arms(&mut self, arms: &[crate::ast::MatchArm]) {
+        for a in arms {
+            if let Some(n) = &a.binding { self.give(n, Source::Other); }
+            self.stmt(&a.body);
+        }
+    }
+
+    /// A parameter `n`: its value is the caller's.
+    pub(crate) fn param(&mut self, n: &str) { self.give(n, Source::Other); }
 
     fn init(&mut self, i: &Initializer) {
         match i {
@@ -7754,7 +7832,11 @@ impl WriteScan {
 
     fn decl(&mut self, d: &Decl) {
         if let Decl::Var { declarators, .. } = d {
-            for d in declarators { if let Some(i) = &d.init { self.init(i); } }
+            for d in declarators {
+                let s = match &d.init { Some(Initializer::Expr(e)) => Self::source(e), _ => Source::Other };
+                self.give(&d.name, s);
+                if let Some(i) = &d.init { self.init(i); }
+            }
         }
     }
 
@@ -7778,10 +7860,16 @@ impl WriteScan {
                 if let Some(e) = post { self.expr(e); }
                 self.stmt(body);
             }
-            Stmt::ForEach { iterable, body, .. } => { self.expr(iterable); self.stmt(body); }
+            Stmt::ForEach { name, iterable, body, .. } => {
+                self.give(name, Source::Other);
+                self.expr(iterable); self.stmt(body);
+            }
             Stmt::Switch { val, body, .. } => { self.expr(val); self.stmt(body); }
-            Stmt::Match { scrutinee, arms, .. } => { self.expr(scrutinee); for a in arms { self.stmt(&a.body); } }
-            Stmt::Guard { cond, else_body, .. } => { self.expr(cond); self.stmt(else_body); }
+            Stmt::Match { scrutinee, arms, .. } => { self.expr(scrutinee); self.arms(arms); }
+            Stmt::Guard { binding, cond, else_body, .. } => {
+                if let Some((_, n)) = binding { self.give(n, Source::Other); }
+                self.expr(cond); self.stmt(else_body);
+            }
             Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
             | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => self.stmt(body),
             Stmt::Asm(a) => {
