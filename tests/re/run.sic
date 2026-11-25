@@ -1,0 +1,77 @@
+// The report of each case of cases.txt (see gen.py): every match with its
+// groups, the full match and a replacement, as Python's re gives them in
+// expected.txt.
+//   sic run.sic -o run && ./run cases.txt | diff - expected.txt
+import re;
+#include <stdio.h>
+#include <string.h>
+
+// The bytes the hex text h stands for ("-": none).
+string Unhex(char *h)
+{
+    stringbuilder b;
+    if (h[0] == '-') return "";
+    usize n = strlen(h);
+    char one[2];
+    for (usize i = 0; i + 1 < n; i += 2) {
+        int v = 0;
+        sscanf(h + i, "%2x", &v);
+        one[0] = (char)v;
+        one[1] = 0;
+        string s = one;
+        b += s.dup;
+    }
+    return b.build();
+}
+
+void PrintHex(string s)
+{
+    if (s.size == 0) printf("-");
+    for (usize i = 0; i < s.size; i++) printf("%02x", (int)(u8)s[i]);
+}
+
+void Report(string pat, string text)
+{
+    match (re::Compile(pat)) {
+        Err(e): {
+            printf("error\n");
+            return;
+        }
+        Ok(r): {
+            printf("M");
+            bool some = false;
+            for (auto c : r.captures_iter(text)) {
+                some = true;
+                printf(" ");
+                for (i32 g = 0; g < c.len(); g++) {
+                    if (g > 0) printf(",");
+                    match (c.get(g)) {
+                        Some(m): printf("%zu:%zu", m.start, m.end);
+                        None: printf("-");
+                    }
+                }
+            }
+            if (!some) printf(" none");
+            printf(" F ");
+            match (r.fullmatch(text)) {
+                Some(m): printf("%zu:%zu", m.start, m.end);
+                None: printf("none");
+            }
+            printf(" R ");
+            PrintHex(r.replace_all(text, r.captures_len() >= 2 ? "<$1>" : "<$0>"));
+            printf("\n");
+        }
+    }
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) return 2;
+    FILE *f = fopen(argv[1], "r");
+    if (!f) return 2;
+    char a[4096];
+    char b[4096];
+    while (fscanf(f, "%4095s %4095s", a, b) == 2) Report(Unhex(a), Unhex(b));
+    fclose(f);
+    return 0;
+}

@@ -8,7 +8,8 @@
 #   3. run that suite with the RELEASE compiler at every optimization level
 #      (-O0 -O1 -O2 -O3 -Os -Oz);
 #   4. run the module-test suite (moduletest_rust.sh) with BOTH profiles, and the
-#      driver/module/ABI tests (moduletest.sh) with the release compiler.
+#      driver/module/ABI tests (moduletest.sh) and the re module's tests
+#      (tests/re/re.sh) with the release compiler.
 # Steps 2-4 run once per back end (SIC_BACKEND=cranelift, SIC_BACKEND=llvm).
 # The compile tests run JOBS at a time (default: nproc); JOBS=1 runs them in turn.
 # The LLVM back end needs LLVM 21; without it the build step fails.
@@ -103,6 +104,8 @@ for be in "${BACKENDS[@]}"; do
     step "moduletest (release, $be)" \
         env SIC="$REL" SIC_BACKEND="$be" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_release_$be"
     step "moduletest C (release, $be)" env SIC="$REL" SIC_BACKEND="$be" ./moduletest.sh
+    # The re module: its API, and Python's re as the reference.
+    step "re (release, $be)" env SIC="$REL" SIC_BACKEND="$be" tests/re/re.sh
     # Compile-test suite at every optimization level with the release compiler —
     # covers both "compiletest with release" and the optimization-level sweep.
     for opt in -O0 -O1 -O2 -O3 -Os -Oz; do

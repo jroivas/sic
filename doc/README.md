@@ -53,11 +53,14 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     hand-written wrappers, type mapping, panics.
 17. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
-18. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
+18. [Regular expressions](regex.md) — the `re` module: `re::Compile`, `find`,
+    `captures`, iteration, `replace_all` and `split`; linear-time matching, the
+    pattern syntax, and what is not supported.
+19. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
     conversion guide with ✗/✓ examples.
-19. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
+20. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
     wrapping, comments): what `sic-fmt` produces.
-20. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
+21. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
     `-fbackend=`, how they differ, and `-m32`.
 
 ## Design goals

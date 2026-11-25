@@ -1,0 +1,68 @@
+find: 2-7 [hello]
+find_at 4: 8-13 [world]
+find_at end: none
+find_at past: none
+^ at 1: none
+fullmatch ab: 0-2 [ab]
+fullmatch abc: none
+is_match: 1 0
+as_str: a|ab, captures_len: 1
+len 5: [2026-11] [2026] [11] []
+name y: 3-7 [2026]
+name m: 8-10 [11]
+name zz: none
+group 3: none
+group 9: none
+captures: none
+find_iter: 1-2 3-5 6-9
+empty matches: 0-0 1-3 3-3 4-4
+find_all: 2 [7] [42]
+captures_iter: a:1 b: c:33
+replace_all: y/x and bar/foo
+replace: <x@y> and foo@bar
+replacen 0: 1 2 3
+replacen 2: # # 3
+dollars: $1 $   ys  ${host
+$1a: [][xa]
+no match: abc
+split: {a} {b} {c} {} {d}
+split edges: {} {a} {}
+split empty: {}
+splitn 0:
+splitn 1: {a,b,c}
+splitn 2: {a} {b,c}
+splitn 9: {a} {b} {c}
+split by empty: {} {a} {b} {c} {}
+escape: a\.b\*c\+d\?\(e\)\[f\]\{g\}\|h\^i\$j\\k\#l\&m\-n\~o\ p
+escape matches: 0-35 [a.b*c+d?(e)[f]{g}|h^i$j\k#l&m-n~o p]
+utf8: 3-12 [éαβγ!]
+hex escapes: 1-14 [☺😀😀é]
+invalid byte: 0-3 [a�b]
+verbose: 0-11 [12   abc ok]
+scoped i: 0-3 [aBc]
+(?-i): 3-5 [Ab]
+multiline: [one] [four]
+lazy: 0-3 [<a>]
+(a)\1: re: backreferences are not supported at position 3
+(?P<n>a)(?P=n): re: backreferences are not supported at position 8
+\k<n>: re: backreferences are not supported at position 0
+a(?=b): re: lookaround is not supported at position 1
+a(?!b): re: lookaround is not supported at position 1
+(?<=a)b: re: lookaround is not supported at position 0
+(?<!a)b: re: lookaround is not supported at position 0
+\p{L}: re: Unicode classes are not supported at position 0
+a*+: re: possessive repetition is not supported at position 2
+a{1001}: re: repetition count too large at position 1
+(?:a{1000}){1000}: re: pattern too large at position 0
+x{2}{3}: re: multiple repeat at position 4
+(?P<1a>x): re: bad character in group name at position 4
+(?<>x): re: missing group name at position 0
+\x{110000}: re: bad code point at position 0
+\uD800: re: bad code point at position 0
+(?i: re: missing ), unterminated subpattern at position 0
+[\d-z]: re: bad character range at position 1
+abc\: re: bad escape (end of pattern) at position 3
+(?): re: missing flag at position 0
+(?-)x: re: missing flag at position 0
+deep: re: too deeply nested at position 250
+ok(?#a comment): compiled

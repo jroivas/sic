@@ -144,6 +144,16 @@
 
 ### SIC
 
+- **Regular expressions**: the `re` module (`import re;`, doc/regex.md), after
+  Rust's `regex` and Python's `re`. `re::Compile` gives a `re::Regex` with
+  `is_match`, `find`, `find_at`, `fullmatch`, `captures`, `find_iter`,
+  `captures_iter`, `find_all`, `replace`/`replace_all`/`replacen` (`$1`,
+  `${name}`) and `split`/`splitn`; `re::Escape`. Matching is linear in the
+  text (a Pike VM), leftmost-first, over UTF-8 code points with byte offsets.
+  Classes, `\d \w \s \b`, anchors, named groups, greedy and lazy counted
+  repetition and the `i m s x` flags; backreferences and lookaround are
+  compile errors. Tested against Python's `re` on 9 000 cases
+  (tests/re/re.sh, in check.sh).
 - **Bounds** (sic.md §"Bounds"): an access stays in the object its pointer was
   formed from, or the program stops ("sic: out-of-bounds access"). Only
   `name[i]` on a `new` variable was checked. Now these are checked too:

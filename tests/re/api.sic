@@ -1,0 +1,173 @@
+// The re module's API, against api.expected (tests/re/re.sh).
+import re;
+#include <stdio.h>
+
+void Show(string label, Option<re::Match> om)
+{
+    match (om) {
+        Some(m): printf("%s: %zu-%zu [%s]\n", label.ptr, m.start, m.end, m.text.ptr);
+        None: printf("%s: none\n", label.ptr);
+    }
+}
+
+void Error(string pat)
+{
+    match (re::Compile(pat)) {
+        Ok(r): printf("%s: compiled\n", pat.ptr);
+        Err(e): printf("%s: %s\n", pat.ptr, e.ptr);
+    }
+}
+
+void Split(string label, list<string> parts)
+{
+    printf("%s:", label.ptr);
+    for (auto p : parts.values) printf(" {%s}", p.ptr);
+    printf("\n");
+}
+
+int main()
+{
+    // find, find_at (what precedes start counts for ^ and \b), fullmatch, is_match
+    auto w = re::Compile("\\b\\w+") else return 1;
+    Show("find", w.find("  hello world"));
+    Show("find_at 4", w.find_at("  hello world", 4));
+    Show("find_at end", w.find_at("abc", 3));
+    Show("find_at past", w.find_at("abc", 9));
+    auto caret = re::Compile("^a") else return 1;
+    Show("^ at 1", caret.find_at("aa", 1));
+    auto full = re::Compile("a|ab") else return 1;
+    Show("fullmatch ab", full.fullmatch("ab"));
+    Show("fullmatch abc", full.fullmatch("abc"));
+    printf("is_match: %d %d\n", w.is_match("!x"), w.is_match("!!"));
+    printf("as_str: %s, captures_len: %d\n", full.as_str().ptr, full.captures_len());
+
+    // captures: by number, by name (both name syntaxes), unmatched groups
+    auto date = re::Compile("(?P<y>\\d{4})-(?<m>\\d\\d)(-(\\d\\d))?") else return 1;
+    match (date.captures("on 2026-11 ok")) {
+        Some(c): {
+            printf(
+                "len %d: [%s] [%s] [%s] [%s]\n",
+                c.len(),
+                c.group(0).ptr,
+                c.group(1).ptr,
+                c.group(2).ptr,
+                c.group(4).ptr
+            );
+            Show("name y", c.name("y"));
+            Show("name m", c.name("m"));
+            Show("name zz", c.name("zz"));
+            Show("group 3", c.get(3));
+            Show("group 9", c.get(9));
+        }
+        None: return 2;
+    }
+    match (date.captures("nothing")) {
+        Some(c): return 3;
+        None: printf("captures: none\n");
+    }
+
+    // iteration, empty matches (Python's rule)
+    auto digits = re::Compile("\\d+") else return 1;
+    printf("find_iter:");
+    for (auto m : digits.find_iter("a1b22c333")) printf(" %zu-%zu", m.start, m.end);
+    printf("\n");
+    auto star = re::Compile("x*") else return 1;
+    printf("empty matches:");
+    for (auto m : star.find_iter("axxb")) printf(" %zu-%zu", m.start, m.end);
+    printf("\n");
+    list<re::Match> all = digits.find_all("7 and 42");
+    printf("find_all: %zu [%s] [%s]\n", all.size, all[0].text.ptr, all[1].text.ptr);
+    auto kv = re::Compile("(\\w+)=(\\w*)") else return 1;
+    printf("captures_iter:");
+    for (auto c : kv.captures_iter("a=1, b=, c=33"))
+        printf(" %s:%s", c.group(1).ptr, c.group(2).ptr);
+    printf("\n");
+
+    // replacement syntax
+    auto mail = re::Compile("(\\w+)@(?P<host>\\w+)") else return 1;
+    printf("replace_all: %s\n", mail.replace_all("x@y and foo@bar", "${host}/$1").ptr);
+    printf("replace: %s\n", mail.replace("x@y and foo@bar", "<$0>").ptr);
+    printf("replacen 0: %s\n", digits.replacen("1 2 3", 0, "#").ptr);
+    printf("replacen 2: %s\n", digits.replacen("1 2 3", 2, "#").ptr);
+    printf("dollars: %s\n", mail.replace("x@y", "$$1 $ $x $9 ${host}s $hosts ${host").ptr);
+    printf("$1a: %s\n", mail.replace("x@y", "[$1a][${1}a]").ptr);
+    printf("no match: %s\n", digits.replace_all("abc", "#").ptr);
+
+    // split, splitn
+    auto comma = re::Compile(",\\s*") else return 1;
+    Split("split", comma.split("a, b,c,,  d"));
+    Split("split edges", comma.split(",a,"));
+    Split("split empty", comma.split(""));
+    Split("splitn 0", comma.splitn("a,b,c", 0));
+    Split("splitn 1", comma.splitn("a,b,c", 1));
+    Split("splitn 2", comma.splitn("a,b,c", 2));
+    Split("splitn 9", comma.splitn("a,b,c", 9));
+    auto none = re::Compile("") else return 1;
+    Split("split by empty", none.split("abc"));
+
+    // Escape: every meta character matches itself
+    string special = "a.b*c+d?(e)[f]{g}|h^i$j\\k#l&m-n~o p";
+    string esc = re::Escape(special);
+    printf("escape: %s\n", esc.ptr);
+    auto lit = re::Compile(esc) else return 4;
+    Show("escape matches", lit.fullmatch(special));
+
+    // UTF-8: byte offsets, code point classes, escapes; invalid bytes
+    auto cafe = re::Compile("é[α-ω]+.") else return 1;
+    Show("utf8", cafe.find("caféαβγ!"));
+    auto smile = re::Compile("\\x{263A}\\u{1F600}\\U0001F600\\u00e9") else return 1;
+    Show("hex escapes", smile.find("x☺😀😀é"));
+    auto dot = re::Compile("a.b") else return 1;
+    char bad[4];
+    bad[0] = 'a';
+    bad[1] = (char)0xFF;
+    bad[2] = 'b';
+    bad[3] = 0;
+    string invalid = bad;
+    Show("invalid byte", dot.find(invalid));
+
+    // flags
+    auto verbose = re::Compile("(?x) \\d+ \\s* # number\n [a-z]+ \\  ok") else return 1;
+    Show("verbose", verbose.find("12   abc ok"));
+    auto scoped = re::Compile("a(?i:b)c") else return 1;
+    Show("scoped i", scoped.find("aBc aBC"));
+    auto off = re::Compile("(?i)a(?-i)b") else return 1;
+    Show("(?-i)", off.find("AB Ab"));
+    auto lines = re::Compile("(?m)^\\w+$") else return 1;
+    printf("multiline:");
+    for (auto m : lines.find_iter("one\ntwo three\nfour")) printf(" [%s]", m.text.ptr);
+    printf("\n");
+    auto lazy = re::Compile("<.+?>") else return 1;
+    Show("lazy", lazy.find("<a><b>"));
+
+    // not supported, and limits
+    Error("(a)\\1");
+    Error("(?P<n>a)(?P=n)");
+    Error("\\k<n>");
+    Error("a(?=b)");
+    Error("a(?!b)");
+    Error("(?<=a)b");
+    Error("(?<!a)b");
+    Error("\\p{L}");
+    Error("a*+");
+    Error("a{1001}");
+    Error("(?:a{1000}){1000}");
+    Error("x{2}{3}");
+    Error("(?P<1a>x)");
+    Error("(?<>x)");
+    Error("\\x{110000}");
+    Error("\\uD800");
+    Error("(?i");
+    Error("[\\d-z]");
+    Error("abc\\");
+    Error("(?)");
+    Error("(?-)x");
+    string deep = "";
+    for (i32 k = 0; k < 300; k++) deep = deep + "(";
+    match (re::Compile(deep)) {
+        Ok(r): printf("deep: compiled\n");
+        Err(e): printf("deep: %s\n", e.ptr);
+    }
+    Error("ok(?#a comment)");
+    return 0;
+}

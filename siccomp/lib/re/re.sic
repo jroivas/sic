@@ -1,0 +1,1467 @@
+// re — regular expressions, after Rust's `regex` crate and Python's `re`.
+//
+// Usage:
+//   import re;
+//   auto r = re::Compile("(?P<year>\\d{4})-(\\d{2})") else return 1;
+//   r.is_match(s);                    // bool
+//   match (r.find(s)) { Some(m): … m.start, m.end, m.text …  None: … }
+//   match (r.captures(s)) { Some(c): c.group(1), c.name("year") …  None: … }
+//   for (auto m : r.find_iter(s)) …
+//   r.replace_all(s, "$2/${year}");
+//   r.split(s);
+//   re::Escape("a.b");               // "a\\.b"
+//
+// Matching runs in time linear in the text (a Pike VM: all the ways the pattern
+// can match are followed at once), and leftmost-first: of the matches that
+// start first, the one the pattern prefers wins (`a|ab` on "ab" is "a"), as in
+// Rust and Python. Backreferences and lookaround are not supported (they need
+// backtracking, which can take exponential time).
+//
+// The text is UTF-8: `.` and a class match one code point. Offsets are bytes, so
+// `s[m.start:m.end]` is the match. `\d \w \s \b` and `(?i)` are ASCII-only.
+module re;
+
+#include <stdio.h>
+
+// Instructions.
+#define I_CHAR 0     // the code point x
+#define I_ANY 1      // any code point but '\n'
+#define I_ANYNL 2    // any code point
+#define I_CLASS 3    // a code point in class x
+#define I_SPLIT 4    // continue at x, else at y
+#define I_JMP 5      // continue at x
+#define I_SAVE 6     // record the position in slot x
+#define I_LOOK 7     // the assertion x holds here
+#define I_MATCH 8
+
+// Assertions.
+#define L_START 0    // ^ \A
+#define L_END 1      // $ \z \Z
+#define L_LINE_START 2   // ^ with (?m)
+#define L_LINE_END 3     // $ with (?m)
+#define L_WORD 4     // \b
+#define L_NOT_WORD 5 // \B
+
+// Parse tree nodes.
+#define N_EMPTY 0
+#define N_CHAR 1     // a: code point
+#define N_ANY 2      // a: also '\n'
+#define N_CLASS 3    // a: class
+#define N_LOOK 4     // a: assertion
+#define N_CAT 5      // children
+#define N_ALT 6      // children
+#define N_CAP 7      // a: group, child
+#define N_REP 8      // a: min, b: max (-1: none), c: greedy, child
+
+// A counted repetition's largest bound, the compiled program's size and the
+// nesting of groups (as in Rust, a pattern cannot exhaust memory or the stack).
+#define MAX_REPEAT 1000
+#define MAX_INSTS 100000
+#define MAX_DEPTH 250
+
+#define MAX_CP 0x10FFFF
+
+// The code point at byte i of s (n bytes), packed as (code point << 3) | width.
+// A byte that does not start a valid sequence is U+FFFD, one byte wide.
+static i64 Decode(string s, i64 i, i64 n)
+{
+    i64 b0 = (i64)(u8)s[i];
+    if (b0 < 0x80) return (b0 << 3) | 1;
+    i64 need = 0;
+    i64 v = 0;
+    i64 low = 0;
+    if (b0 >= 0xC2 && b0 <= 0xDF) { need = 1; v = b0 & 0x1F; low = 0x80; }
+    else if (b0 >= 0xE0 && b0 <= 0xEF) { need = 2; v = b0 & 0x0F; low = 0x800; }
+    else if (b0 >= 0xF0 && b0 <= 0xF4) { need = 3; v = b0 & 0x07; low = 0x10000; }
+    else return (0xFFFD << 3) | 1;
+    if (i + need >= n + 1) return (0xFFFD << 3) | 1;
+    for (i64 k = 1; k <= need; k++) {
+        i64 b = (i64)(u8)s[i + k];
+        if ((b & 0xC0) != 0x80) return (0xFFFD << 3) | 1;
+        v = (v << 6) | (b & 0x3F);
+    }
+    if (v < low || v > MAX_CP || (v >= 0xD800 && v <= 0xDFFF)) return (0xFFFD << 3) | 1;
+    return (v << 3) | (1 + need);
+}
+
+static bool IsWordByte(i64 b)
+{
+    return (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_';
+}
+
+// A compiled pattern: its instructions and its classes, each a sorted list of
+// disjoint code point ranges (lo[k]..hi[k] for k in start[c] .. start[c] + count[c]).
+struct Prog {
+    // Instruction k is op[k] with operands x[k], y[k] (parallel lists of
+    // integers: a list of structs copies an element on every read).
+    list<i32> op;
+    list<i32> x;
+    list<i32> y;
+    list<i32> lo;
+    list<i32> hi;
+    list<i32> cstart;
+    list<i32> ccount;
+    i32 nslots;
+    // The byte every match starts with (ASCII), or -1: the search skips to it.
+    i32 first;
+};
+
+static bool InClass(Prog *p, i32 c, i64 cp)
+{
+    i32 a = p->cstart[c];
+    i32 b = a + p->ccount[c];
+    while (a < b) {
+        i32 m = (a + b) / 2;
+        if (cp < (i64)p->lo[m]) b = m;
+        else if (cp > (i64)p->hi[m]) a = m + 1;
+        else return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// Parser: pattern → tree (nodes in parallel lists, children in `kids`).
+// ---------------------------------------------------------------------------
+
+struct Parser {
+    string src;
+    list<i32> pat;      // the pattern's code points
+    list<i32> off;      // their byte offsets in src (and src's size)
+    i32 i;
+    i32 depth;
+    bool fi;            // (?i) (?m) (?s) (?x)
+    bool fm;
+    bool fs;
+    bool fx;
+    list<i32> kind;
+    list<i32> na;
+    list<i32> nb;
+    list<i32> nc;
+    list<i32> kid0;
+    list<i32> nkid;
+    list<i32> kids;
+    list<string> names; // per group (0: the whole match); "" unnamed
+    string err;
+    // A class being built.
+    list<i32> clo;
+    list<i32> chi;
+    // The escape just parsed: a code point, a Perl class or an assertion.
+    i32 ekind;          // 0 code point, 1 class (ecp: d D w W s S), 2 assertion
+    i32 ecp;
+    Prog prog;
+};
+
+static void Fail(Parser *p, char *msg, i32 pos)
+{
+    if (!p->err.is_empty()) return;
+    char buf[160];
+    snprintf(buf, 160, "re: %s at position %d", msg, pos);
+    string e = buf;
+    p->err = e.dup;
+}
+
+static i32 Node(Parser *p, i32 kind, i32 a, i32 b, i32 c)
+{
+    p->kind.add(kind);
+    p->na.add(a);
+    p->nb.add(b);
+    p->nc.add(c);
+    p->kid0.add(0);
+    p->nkid.add(0);
+    return (i32)p->kind.size - 1;
+}
+
+static void SetKids(Parser *p, i32 node, list<i32> *ks)
+{
+    p->kid0[node] = (i32)p->kids.size;
+    p->nkid[node] = (i32)ks->size;
+    for (i32 k = 0; k < (i32)ks->size; k++) p->kids.add((*ks)[k]);
+}
+
+static i32 Node1(Parser *p, i32 kind, i32 a, i32 b, i32 c, i32 child)
+{
+    i32 n = Node(p, kind, a, b, c);
+    p->kid0[n] = (i32)p->kids.size;
+    p->nkid[n] = 1;
+    p->kids.add(child);
+    return n;
+}
+
+static bool AtEnd(Parser *p) { return p->i >= (i32)p->pat.size; }
+static i32 Peek(Parser *p) { return AtEnd(p) ? -1 : p->pat[p->i]; }
+static i32 PeekAt(Parser *p, i32 k) { return p->i + k < (i32)p->pat.size ? p->pat[p->i + k] : -1; }
+
+// (?x): skip whitespace and `#` comments.
+static void SkipSpace(Parser *p)
+{
+    if (!p->fx) return;
+    while (!AtEnd(p)) {
+        i32 c = Peek(p);
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 0x0B || c == 0x0C) {
+            p->i++;
+            continue;
+        }
+        if (c == '#') {
+            while (!AtEnd(p) && Peek(p) != '\n') p->i++;
+            continue;
+        }
+        break;
+    }
+}
+
+// -- classes ----------------------------------------------------------------
+
+static void ClassAdd(Parser *p, i32 lo, i32 hi)
+{
+    p->clo.add(lo);
+    p->chi.add(hi);
+}
+
+// Sort the class's ranges and merge overlapping or adjacent ones.
+static void ClassNormalize(Parser *p)
+{
+    i32 n = (i32)p->clo.size;
+    for (i32 a = 1; a < n; a++) {
+        i32 l = p->clo[a];
+        i32 h = p->chi[a];
+        i32 b = a - 1;
+        while (b >= 0 && p->clo[b] > l) {
+            p->clo[b + 1] = p->clo[b];
+            p->chi[b + 1] = p->chi[b];
+            b--;
+        }
+        p->clo[b + 1] = l;
+        p->chi[b + 1] = h;
+    }
+    list<i32> lo;
+    list<i32> hi;
+    for (i32 a = 0; a < n; a++) {
+        i32 m = (i32)lo.size;
+        if (m > 0 && p->clo[a] <= hi[m - 1] + 1) {
+            if (p->chi[a] > hi[m - 1]) hi[m - 1] = p->chi[a];
+        } else {
+            lo.add(p->clo[a]);
+            hi.add(p->chi[a]);
+        }
+    }
+    p->clo = lo;
+    p->chi = hi;
+}
+
+// (?i): add the other case of every ASCII letter in the class.
+static void ClassFold(Parser *p)
+{
+    i32 n = (i32)p->clo.size;
+    for (i32 k = 0; k < n; k++) {
+        i32 l = p->clo[k];
+        i32 h = p->chi[k];
+        i32 a = l > 'a' ? l : 'a';
+        i32 b = h < 'z' ? h : 'z';
+        if (a <= b) ClassAdd(p, a - 32, b - 32);
+        a = l > 'A' ? l : 'A';
+        b = h < 'Z' ? h : 'Z';
+        if (a <= b) ClassAdd(p, a + 32, b + 32);
+    }
+    ClassNormalize(p);
+}
+
+static void ClassNegate(Parser *p)
+{
+    list<i32> lo;
+    list<i32> hi;
+    i32 next = 0;
+    for (i32 k = 0; k < (i32)p->clo.size; k++) {
+        if (p->clo[k] > next) {
+            lo.add(next);
+            hi.add(p->clo[k] - 1);
+        }
+        next = p->chi[k] + 1;
+    }
+    if (next <= MAX_CP) {
+        lo.add(next);
+        hi.add(MAX_CP);
+    }
+    p->clo = lo;
+    p->chi = hi;
+}
+
+// \d \w \s (and, upper case, their complement) into the class being built.
+static void ClassPerl(Parser *p, i32 which)
+{
+    list<i32> savelo = p->clo;
+    list<i32> savehi = p->chi;
+    list<i32> nlo;
+    list<i32> nhi;
+    p->clo = nlo;
+    p->chi = nhi;
+    i32 w = which | 0x20;
+    if (w == 'd') ClassAdd(p, '0', '9');
+    else if (w == 'w') {
+        ClassAdd(p, '0', '9');
+        ClassAdd(p, 'A', 'Z');
+        ClassAdd(p, '_', '_');
+        ClassAdd(p, 'a', 'z');
+    } else {
+        ClassAdd(p, 9, 13);
+        ClassAdd(p, ' ', ' ');
+    }
+    if (which != w) ClassNegate(p);
+    list<i32> plo = p->clo;
+    list<i32> phi = p->chi;
+    p->clo = savelo;
+    p->chi = savehi;
+    for (i32 k = 0; k < (i32)plo.size; k++) ClassAdd(p, plo[k], phi[k]);
+}
+
+// The class being built, folded and negated as asked, as a node.
+static i32 ClassNode(Parser *p, bool negate)
+{
+    ClassNormalize(p);
+    if (p->fi) ClassFold(p);
+    if (negate) ClassNegate(p);
+    i32 c = (i32)p->prog.cstart.size;
+    p->prog.cstart.add((i32)p->prog.lo.size);
+    p->prog.ccount.add((i32)p->clo.size);
+    for (i32 k = 0; k < (i32)p->clo.size; k++) {
+        p->prog.lo.add(p->clo[k]);
+        p->prog.hi.add(p->chi[k]);
+    }
+    list<i32> lo;
+    list<i32> hi;
+    p->clo = lo;
+    p->chi = hi;
+    return Node(p, N_CLASS, c, 0, 0);
+}
+
+// A literal code point (both cases with (?i)).
+static i32 CharNode(Parser *p, i32 c)
+{
+    if (p->fi && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        ClassAdd(p, c, c);
+        return ClassNode(p, false);
+    }
+    return Node(p, N_CHAR, c, 0, 0);
+}
+
+// -- escapes ----------------------------------------------------------------
+
+static i32 HexDigit(i32 c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// `digits` hex digits, or with -1 `{…}` (1 to 8 of them); -1 on error.
+static i32 ParseHex(Parser *p, i32 digits, i32 at)
+{
+    i32 v = 0;
+    if (Peek(p) == '{') {
+        p->i++;
+        i32 k = 0;
+        while (!AtEnd(p) && Peek(p) != '}') {
+            i32 d = HexDigit(Peek(p));
+            if (d < 0 || k >= 8) { Fail(p, "bad hexadecimal escape", at); return -1; }
+            v = v * 16 + d;
+            p->i++;
+            k++;
+        }
+        if (AtEnd(p) || k == 0) { Fail(p, "bad hexadecimal escape", at); return -1; }
+        p->i++;
+    } else {
+        for (i32 k = 0; k < digits; k++) {
+            i32 d = HexDigit(Peek(p));
+            if (d < 0) { Fail(p, "bad hexadecimal escape", at); return -1; }
+            v = v * 16 + d;
+            p->i++;
+        }
+    }
+    if (v > MAX_CP || (v >= 0xD800 && v <= 0xDFFF)) { Fail(p, "bad code point", at); return -1; }
+    return v;
+}
+
+// The escape after a `\` (at `at`), into ekind/ecp. False on error.
+static bool ParseEscape(Parser *p, bool in_class, i32 at)
+{
+    if (AtEnd(p)) { Fail(p, "bad escape (end of pattern)", at); return false; }
+    i32 c = Peek(p);
+    p->i++;
+    p->ekind = 0;
+    if (c == 'n') { p->ecp = '\n'; return true; }
+    if (c == 't') { p->ecp = '\t'; return true; }
+    if (c == 'r') { p->ecp = '\r'; return true; }
+    if (c == 'f') { p->ecp = 0x0C; return true; }
+    if (c == 'v') { p->ecp = 0x0B; return true; }
+    if (c == 'a') { p->ecp = 0x07; return true; }
+    if (c == '0') { p->ecp = 0; return true; }
+    if (c == 'x') { p->ecp = ParseHex(p, 2, at); return p->ecp >= 0; }
+    if (c == 'u') { p->ecp = ParseHex(p, 4, at); return p->ecp >= 0; }
+    if (c == 'U') { p->ecp = ParseHex(p, 8, at); return p->ecp >= 0; }
+    if (c == 'd' || c == 'D' || c == 'w' || c == 'W' || c == 's' || c == 'S') {
+        p->ekind = 1;
+        p->ecp = c;
+        return true;
+    }
+    if (c == 'b' && in_class) { p->ecp = 0x08; return true; }
+    if (!in_class) {
+        p->ekind = 2;
+        if (c == 'b') { p->ecp = L_WORD; return true; }
+        if (c == 'B') { p->ecp = L_NOT_WORD; return true; }
+        if (c == 'A') { p->ecp = L_START; return true; }
+        if (c == 'z' || c == 'Z') { p->ecp = L_END; return true; }
+        p->ekind = 0;
+    }
+    if ((c >= '1' && c <= '9') || c == 'k' || c == 'g') {
+        Fail(p, "backreferences are not supported", at);
+        return false;
+    }
+    if (c == 'p' || c == 'P') { Fail(p, "Unicode classes are not supported", at); return false; }
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+        Fail(p, "bad escape", at);
+        return false;
+    }
+    p->ecp = c;
+    return true;
+}
+
+// `[…]` after the `[` (at `at`).
+static i32 ParseClass(Parser *p, i32 at)
+{
+    bool negate = false;
+    if (Peek(p) == '^') { negate = true; p->i++; }
+    bool first = true;
+    for (;;) {
+        if (AtEnd(p)) { Fail(p, "unterminated character set", at); return -1; }
+        i32 c = Peek(p);
+        if (c == ']' && !first) { p->i++; break; }
+        first = false;
+        i32 lo = 0;
+        i32 here = p->i;
+        p->i++;
+        if (c == '\\') {
+            if (!ParseEscape(p, true, here)) return -1;
+            if (p->ekind == 1) {
+                // `\d-z` is not a range (Python and Rust reject it too).
+                if (Peek(p) == '-' && PeekAt(p, 1) != ']' && PeekAt(p, 1) != -1) {
+                    Fail(p, "bad character range", here);
+                    return -1;
+                }
+                ClassPerl(p, p->ecp);
+                continue;
+            }
+            lo = p->ecp;
+        } else lo = c;
+        // A range `lo-hi`, unless the `-` ends the class.
+        if (Peek(p) == '-' && PeekAt(p, 1) != ']' && PeekAt(p, 1) != -1) {
+            p->i++;
+            i32 h = Peek(p);
+            i32 there = p->i;
+            p->i++;
+            if (h == '\\') {
+                if (!ParseEscape(p, true, there)) return -1;
+                if (p->ekind == 1) { Fail(p, "bad character range", here); return -1; }
+                h = p->ecp;
+            }
+            if (h < lo) { Fail(p, "bad character range", here); return -1; }
+            ClassAdd(p, lo, h);
+        } else ClassAdd(p, lo, lo);
+    }
+    return ClassNode(p, negate);
+}
+
+// -- groups, repetition, alternation ----------------------------------------
+
+static i32 ParseAlt(Parser *p);
+
+static bool IsNameStart(i32 c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+static bool IsNameChar(i32 c) { return IsNameStart(c) || (c >= '0' && c <= '9'); }
+
+// A group name up to `>`.
+static string ParseName(Parser *p, i32 at)
+{
+    i32 start = p->i;
+    while (!AtEnd(p) && Peek(p) != '>') {
+        i32 c = Peek(p);
+        if (!(p->i == start ? IsNameStart(c) : IsNameChar(c))) {
+            Fail(p, "bad character in group name", p->i);
+            return "";
+        }
+        p->i++;
+    }
+    if (AtEnd(p) || p->i == start) { Fail(p, "missing group name", at); return ""; }
+    string name = p->src[(isize)p->off[start]:(isize)p->off[p->i]];
+    p->i++;
+    for (i32 k = 0; k < (i32)p->names.size; k++) {
+        if (p->names[k] == name) { Fail(p, "duplicate group name", at); return ""; }
+    }
+    return name;
+}
+
+// The flags of `(?…` up to `)` or `:` (into the parser); false on error.
+static bool ParseFlags(Parser *p, i32 at)
+{
+    bool on = true;
+    bool some = false;
+    while (!AtEnd(p) && Peek(p) != ')' && Peek(p) != ':') {
+        i32 c = Peek(p);
+        p->i++;
+        if (c == '-') {
+            if (!on) { Fail(p, "bad inline flags", at); return false; }
+            on = false;
+            continue;
+        }
+        if (c == 'i') p->fi = on;
+        else if (c == 'm') p->fm = on;
+        else if (c == 's') p->fs = on;
+        else if (c == 'x') p->fx = on;
+        else { Fail(p, "unknown flag", p->i - 1); return false; }
+        some = true;
+    }
+    if (AtEnd(p)) { Fail(p, "missing ), unterminated subpattern", at); return false; }
+    if (!some && Peek(p) == ')') { Fail(p, "missing flag", at); return false; }
+    return true;
+}
+
+// A group after its `(` (at `at`). -2: an inline flag group or a comment, no node.
+static i32 ParseGroup(Parser *p, i32 at)
+{
+    i32 group = -1;
+    string name = "";
+    bool fi = p->fi;
+    bool fm = p->fm;
+    bool fs = p->fs;
+    bool fx = p->fx;
+    if (Peek(p) == '?') {
+        p->i++;
+        i32 c = Peek(p);
+        if (c == ':') p->i++;
+        else if (c == '#') {
+            while (!AtEnd(p) && Peek(p) != ')') p->i++;
+            if (AtEnd(p)) { Fail(p, "missing ), unterminated comment", at); return -1; }
+            p->i++;
+            return -2;
+        } else if (c == '=' || c == '!' || (c == '<' && (PeekAt(p, 1) == '=' || PeekAt(p, 1) == '!'))) {
+            Fail(p, "lookaround is not supported", at);
+            return -1;
+        } else if (c == 'P' && PeekAt(p, 1) == '=') {
+            Fail(p, "backreferences are not supported", at);
+            return -1;
+        } else if (c == '<' || (c == 'P' && PeekAt(p, 1) == '<')) {
+            p->i += c == 'P' ? 2 : 1;
+            name = ParseName(p, at);
+            if (!p->err.is_empty()) return -1;
+            group = (i32)p->names.size;
+            p->names.add(name);
+        } else {
+            if (!ParseFlags(p, at)) return -1;
+            if (Peek(p) == ')') {
+                // `(?i)`: the flags hold to the end of the enclosing group.
+                p->i++;
+                return -2;
+            }
+            p->i++;
+        }
+    } else {
+        group = (i32)p->names.size;
+        p->names.add("");
+    }
+    if (p->depth >= MAX_DEPTH) { Fail(p, "too deeply nested", at); return -1; }
+    p->depth++;
+    i32 body = ParseAlt(p);
+    p->depth--;
+    if (body < 0) return -1;
+    if (Peek(p) != ')') { Fail(p, "missing ), unterminated subpattern", at); return -1; }
+    p->i++;
+    p->fi = fi;
+    p->fm = fm;
+    p->fs = fs;
+    p->fx = fx;
+    if (group < 0) return body;
+    return Node1(p, N_CAP, group, 0, 0, body);
+}
+
+// A number of a `{m,n}`, or -1 when there is none.
+static i32 ParseNumber(Parser *p)
+{
+    if (!(Peek(p) >= '0' && Peek(p) <= '9')) return -1;
+    i32 v = 0;
+    while (Peek(p) >= '0' && Peek(p) <= '9') {
+        if (v <= MAX_REPEAT) v = v * 10 + (Peek(p) - '0');
+        p->i++;
+    }
+    return v;
+}
+
+// Whether `{m}`, `{m,}`, `{m,n}` or `{,n}` starts here: else `{` is a literal.
+static bool IsCounted(Parser *p)
+{
+    i32 k = p->i + 1;
+    i32 n = (i32)p->pat.size;
+    bool digits = false;
+    while (k < n && p->pat[k] >= '0' && p->pat[k] <= '9') { k++; digits = true; }
+    if (k < n && p->pat[k] == ',') {
+        k++;
+        while (k < n && p->pat[k] >= '0' && p->pat[k] <= '9') { k++; digits = true; }
+    }
+    return digits && k < n && p->pat[k] == '}';
+}
+
+static i32 ParseAtom(Parser *p)
+{
+    i32 at = p->i;
+    i32 c = Peek(p);
+    p->i++;
+    if (c == '(') return ParseGroup(p, at);
+    if (c == '[') return ParseClass(p, at);
+    if (c == '.') return Node(p, N_ANY, p->fs ? 1 : 0, 0, 0);
+    if (c == '^') return Node(p, N_LOOK, p->fm ? L_LINE_START : L_START, 0, 0);
+    if (c == '$') return Node(p, N_LOOK, p->fm ? L_LINE_END : L_END, 0, 0);
+    if (c == '*' || c == '+' || c == '?') {
+        Fail(p, "nothing to repeat", at);
+        return -1;
+    }
+    if (c == '{') {
+        p->i = at;
+        bool counted = IsCounted(p);
+        p->i = at + 1;
+        if (counted) { Fail(p, "nothing to repeat", at); return -1; }
+        return CharNode(p, c);
+    }
+    if (c == '\\') {
+        if (!ParseEscape(p, false, at)) return -1;
+        if (p->ekind == 1) {
+            ClassPerl(p, p->ecp);
+            return ClassNode(p, false);
+        }
+        if (p->ekind == 2) return Node(p, N_LOOK, p->ecp, 0, 0);
+        return CharNode(p, p->ecp);
+    }
+    return CharNode(p, c);
+}
+
+static i32 ParseCat(Parser *p)
+{
+    list<i32> items;
+    for (;;) {
+        SkipSpace(p);
+        if (AtEnd(p) || Peek(p) == '|' || Peek(p) == ')') break;
+        i32 at = p->i;
+        i32 atom = ParseAtom(p);
+        if (atom == -2) continue;
+        if (atom < 0) return -1;
+        bool repeated = false;
+        for (;;) {
+            SkipSpace(p);
+            i32 c = Peek(p);
+            i32 lo = 0;
+            i32 hi = 0;
+            i32 qat = p->i;
+            if (c == '*') { lo = 0; hi = -1; p->i++; }
+            else if (c == '+') { lo = 1; hi = -1; p->i++; }
+            else if (c == '?') { lo = 0; hi = 1; p->i++; }
+            else if (c == '{' && IsCounted(p)) {
+                p->i++;
+                lo = ParseNumber(p);
+                if (lo < 0) lo = 0;
+                hi = lo;
+                if (Peek(p) == ',') {
+                    p->i++;
+                    hi = ParseNumber(p);
+                }
+                p->i++;
+                if (lo > MAX_REPEAT || hi > MAX_REPEAT) {
+                    Fail(p, "repetition count too large", qat);
+                    return -1;
+                }
+                if (hi >= 0 && hi < lo) {
+                    Fail(p, "min repeat greater than max repeat", qat);
+                    return -1;
+                }
+            } else break;
+            if (repeated) { Fail(p, "multiple repeat", qat); return -1; }
+            // A bare assertion cannot be repeated (one in a group can, as in Python).
+            if (p->kind[atom] == N_LOOK && p->pat[at] != '(') {
+                Fail(p, "nothing to repeat", at);
+                return -1;
+            }
+            bool greedy = true;
+            if (Peek(p) == '?') { greedy = false; p->i++; }
+            else if (Peek(p) == '+') {
+                Fail(p, "possessive repetition is not supported", p->i);
+                return -1;
+            }
+            atom = Node1(p, N_REP, lo, hi, greedy ? 1 : 0, atom);
+            repeated = true;
+        }
+        items.add(atom);
+    }
+    if (items.size == 0) return Node(p, N_EMPTY, 0, 0, 0);
+    if (items.size == 1) return items[0];
+    i32 n = Node(p, N_CAT, 0, 0, 0);
+    SetKids(p, n, &items);
+    return n;
+}
+
+static i32 ParseAlt(Parser *p)
+{
+    list<i32> alts;
+    for (;;) {
+        i32 a = ParseCat(p);
+        if (a < 0) return -1;
+        alts.add(a);
+        if (Peek(p) != '|') break;
+        p->i++;
+    }
+    if (alts.size == 1) return alts[0];
+    i32 n = Node(p, N_ALT, 0, 0, 0);
+    SetKids(p, n, &alts);
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// Compiler: tree → instructions.
+// ---------------------------------------------------------------------------
+
+static i32 Emit(Parser *p, i32 op, i32 x, i32 y)
+{
+    if ((i32)p->prog.op.size >= MAX_INSTS) {
+        Fail(p, "pattern too large", 0);
+        return 0;
+    }
+    p->prog.op.add(op);
+    p->prog.x.add(x);
+    p->prog.y.add(y);
+    return (i32)p->prog.op.size - 1;
+}
+
+static i32 Here(Parser *p) { return (i32)p->prog.op.size; }
+
+static void CompileNode(Parser *p, i32 n)
+{
+    if (!p->err.is_empty()) return;
+    i32 k = p->kind[n];
+    if (k == N_EMPTY) return;
+    if (k == N_CHAR) { Emit(p, I_CHAR, p->na[n], 0); return; }
+    if (k == N_ANY) { Emit(p, p->na[n] ? I_ANYNL : I_ANY, 0, 0); return; }
+    if (k == N_CLASS) { Emit(p, I_CLASS, p->na[n], 0); return; }
+    if (k == N_LOOK) { Emit(p, I_LOOK, p->na[n], 0); return; }
+    i32 first = p->kid0[n];
+    i32 count = p->nkid[n];
+    if (k == N_CAT) {
+        for (i32 j = 0; j < count; j++) CompileNode(p, p->kids[first + j]);
+        return;
+    }
+    if (k == N_ALT) {
+        // split L1, L2; L1: a; jmp end; L2: split …; last: z; end:
+        list<i32> jumps;
+        for (i32 j = 0; j < count; j++) {
+            if (j + 1 < count) {
+                i32 s = Emit(p, I_SPLIT, 0, 0);
+                p->prog.x[s] = Here(p);
+                CompileNode(p, p->kids[first + j]);
+                jumps.add(Emit(p, I_JMP, 0, 0));
+                p->prog.y[s] = Here(p);
+            } else CompileNode(p, p->kids[first + j]);
+            if (!p->err.is_empty()) return;
+        }
+        for (i32 j = 0; j < (i32)jumps.size; j++) p->prog.x[jumps[j]] = Here(p);
+        return;
+    }
+    i32 child = p->kids[first];
+    if (k == N_CAP) {
+        Emit(p, I_SAVE, 2 * p->na[n], 0);
+        CompileNode(p, child);
+        Emit(p, I_SAVE, 2 * p->na[n] + 1, 0);
+        return;
+    }
+    // N_REP: the child `min` times, then optional copies (max), or a loop.
+    i32 lo = p->na[n];
+    i32 hi = p->nb[n];
+    bool greedy = p->nc[n] != 0;
+    if (hi < 0) {
+        // x{n,} is x{n-1} x+, and x* is (?:x+)?, with x+ as `L: x; split L, out`,
+        // as Rust compiles them: the loop's first pass may match nothing, a later
+        // empty pass is not taken (it would be back at L at the same position).
+        i32 enter = -1;
+        if (lo == 0) enter = Emit(p, I_SPLIT, 0, 0);
+        for (i32 j = 0; j + 1 < lo; j++) {
+            CompileNode(p, child);
+            if (!p->err.is_empty()) return;
+        }
+        i32 body = Here(p);
+        CompileNode(p, child);
+        i32 s = Emit(p, I_SPLIT, 0, 0);
+        if (!p->err.is_empty()) return;
+        i32 out = Here(p);
+        p->prog.x[s] = greedy ? body : out;
+        p->prog.y[s] = greedy ? out : body;
+        if (enter >= 0) {
+            p->prog.x[enter] = greedy ? body : out;
+            p->prog.y[enter] = greedy ? out : body;
+        }
+        return;
+    }
+    for (i32 j = 0; j < lo; j++) {
+        CompileNode(p, child);
+        if (!p->err.is_empty()) return;
+    }
+    // (x(x(x)?)?)?: each optional copy may stop the rest.
+    list<i32> splits;
+    for (i32 j = lo; j < hi; j++) {
+        splits.add(Emit(p, I_SPLIT, 0, 0));
+        CompileNode(p, child);
+        if (!p->err.is_empty()) return;
+    }
+    i32 out = Here(p);
+    for (i32 j = 0; j < (i32)splits.size; j++) {
+        i32 s = splits[j];
+        p->prog.x[s] = greedy ? s + 1 : out;
+        p->prog.y[s] = greedy ? out : s + 1;
+    }
+}
+
+static void PushTodo(list<i32> *todo, i32 *top, i32 pc)
+{
+    if (*top < (i32)todo->size) (*todo)[*top] = pc;
+    else todo->add(pc);
+    *top = *top + 1;
+}
+
+// The ASCII byte every match must start with, or -1: the code that can run
+// first (through jumps, splits and saves) is only that one character.
+static i32 FirstByte(Prog *g)
+{
+    i32 n = (i32)g->op.size;
+    list<bool> seen;
+    for (i32 k = 0; k < n; k++) seen.add(false);
+    list<i32> todo;
+    todo.add(0);
+    i32 top = 1;
+    i32 found = -1;
+    while (top > 0) {
+        top--;
+        i32 pc = todo[top];
+        if (seen[pc]) continue;
+        seen[pc] = true;
+        i32 op = g->op[pc];
+        if (op == I_JMP) PushTodo(&todo, &top, g->x[pc]);
+        else if (op == I_SPLIT) {
+            PushTodo(&todo, &top, g->x[pc]);
+            PushTodo(&todo, &top, g->y[pc]);
+        } else if (op == I_SAVE) PushTodo(&todo, &top, pc + 1);
+        else if (op == I_CHAR && g->x[pc] < 0x80 && (found < 0 || found == g->x[pc]))
+            found = g->x[pc];
+        else return -1;
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------------------
+// Pike VM.
+// ---------------------------------------------------------------------------
+
+// The search state, reused between searches of one call or iterator. Two sets
+// of threads (instruction, slots), ordered by priority: the current and the next
+// position's. Plain arrays: this is where the time goes.
+struct Vm {
+    i32 n;              // instructions
+    i32 ns;             // slots per thread
+    i32 *op;            // the program's instructions (Prog's, copied)
+    i32 *x;
+    i32 *y;
+    i32 *cdense;
+    i32 *csparse;
+    i64 *cslots;
+    i32 clen;
+    i32 *ndense;
+    i32 *nsparse;
+    i64 *nslots;
+    i32 nlen;
+    i64 *scratch;
+    i64 *stack;         // Follow pushes at most 2 entries per instruction
+    i64 *best;          // the slots of the match found
+    string hay;
+    i64 len;
+
+    ~Vm()
+    {
+        del op;
+        del x;
+        del y;
+        del cdense;
+        del csparse;
+        del cslots;
+        del ndense;
+        del nsparse;
+        del nslots;
+        del scratch;
+        del stack;
+        del best;
+    }
+};
+
+static Vm NewVm(Prog *g)
+{
+    Vm v;
+    i32 n = (i32)g->op.size;
+    i32 ns = g->nslots;
+    v.n = n;
+    v.ns = ns;
+    v.cdense = new i32[n];
+    v.csparse = new i32[n];
+    v.ndense = new i32[n];
+    v.nsparse = new i32[n];
+    v.cslots = new i64[n * ns];
+    v.nslots = new i64[n * ns];
+    v.scratch = new i64[ns];
+    v.best = new i64[ns];
+    v.stack = new i64[2 * n + 2];
+    v.op = new i32[n];
+    v.x = new i32[n];
+    v.y = new i32[n];
+    for (i32 k = 0; k < n; k++) {
+        v.op[k] = g->op[k];
+        v.x[k] = g->x[k];
+        v.y[k] = g->y[k];
+    }
+    for (i32 k = 0; k < ns; k++) v.best[k] = -1;
+    return v;
+}
+
+static bool Holds(Vm *v, i32 look, i64 pos)
+{
+    if (look == L_START) return pos == 0;
+    if (look == L_END) return pos == v->len;
+    if (look == L_LINE_START) return pos == 0 || v->hay[pos - 1] == '\n';
+    if (look == L_LINE_END) return pos == v->len || v->hay[pos] == '\n';
+    bool before = pos > 0 && IsWordByte((i64)(u8)v->hay[pos - 1]);
+    bool after = pos < v->len && IsWordByte((i64)(u8)v->hay[pos]);
+    if (look == L_WORD) return before != after;
+    return before == after;
+}
+
+static void Push(Vm *v, i32 *top, i64 x)
+{
+    v->stack[*top] = x;
+    *top = *top + 1;
+}
+
+// Add the thread at `pc0` with the slots in `scratch` to the next set (`next`)
+// or the current one, following jumps, splits, saves and assertions in priority
+// order. A stack entry ≥ 0 is an instruction to explore; -(slot + 1) restores the
+// slot to the value below it.
+static void Follow(Prog *g, Vm *v, bool next, i32 pc0, i64 pos)
+{
+    i32 top = 0;
+    Push(v, &top, (i64)pc0);
+    while (top > 0) {
+        top--;
+        i64 e = v->stack[top];
+        if (e < 0) {
+            top--;
+            v->scratch[(i32)(-e - 1)] = v->stack[top];
+            continue;
+        }
+        i32 pc = (i32)e;
+        for (;;) {
+            i32 len = next ? v->nlen : v->clen;
+            i32 idx = next ? v->nsparse[pc] : v->csparse[pc];
+            if (idx < len && (next ? v->ndense[idx] : v->cdense[idx]) == pc) break;
+            if (next) {
+                v->nsparse[pc] = len;
+                v->ndense[len] = pc;
+                v->nlen = len + 1;
+            } else {
+                v->csparse[pc] = len;
+                v->cdense[len] = pc;
+                v->clen = len + 1;
+            }
+            i32 op = v->op[pc];
+            if (op == I_JMP) { pc = v->x[pc]; continue; }
+            if (op == I_SPLIT) {
+                Push(v, &top, (i64)v->y[pc]);
+                pc = v->x[pc];
+                continue;
+            }
+            if (op == I_SAVE) {
+                i32 slot = v->x[pc];
+                Push(v, &top, v->scratch[slot]);
+                Push(v, &top, (i64)(-(slot + 1)));
+                v->scratch[slot] = pos;
+                pc++;
+                continue;
+            }
+            if (op == I_LOOK) {
+                if (!Holds(v, v->x[pc], pos)) break;
+                pc++;
+                continue;
+            }
+            // A thread that waits for a character or matches: keep its slots.
+            i32 base = len * v->ns;
+            for (i32 k = 0; k < v->ns; k++) {
+                if (next) v->nslots[base + k] = v->scratch[k];
+                else v->cslots[base + k] = v->scratch[k];
+            }
+            break;
+        }
+    }
+}
+
+// Search `v->hay` from `start` (only there with `anchored`). With `full` a match
+// must end at the end of the text; an empty match at `no_empty` is not taken;
+// with `earliest` the first match found is enough. The match's slots are in
+// `v->best`.
+static bool Search(Prog *g, Vm *v, i64 start, bool anchored, bool full, i64 no_empty, bool earliest)
+{
+    bool matched = false;
+    v->clen = 0;
+    v->nlen = 0;
+    i64 pos = start;
+    i64 n = v->len;
+    for (;;) {
+        if (!matched && (!anchored || pos == start)) {
+            if (v->clen == 0 && g->first >= 0 && !anchored) {
+                while (pos < n && (i32)(u8)v->hay[pos] != g->first) pos++;
+                if (pos >= n) break;
+            }
+            for (i32 k = 0; k < v->ns; k++) v->scratch[k] = -1;
+            Follow(g, v, false, 0, pos);
+        }
+        if (v->clen == 0) break;
+        i64 cp = -1;
+        i64 w = 0;
+        if (pos < n) {
+            i64 d = Decode(v->hay, pos, n);
+            cp = d >> 3;
+            w = d & 7;
+        }
+        v->nlen = 0;
+        for (i32 t = 0; t < v->clen; t++) {
+            i32 pc = v->cdense[t];
+            i32 op = v->op[pc];
+            i32 base = t * v->ns;
+            bool step = false;
+            if (op == I_MATCH) {
+                if (full && pos != n) continue;
+                if (pos == no_empty && v->cslots[base] == pos) continue;
+                for (i32 k = 0; k < v->ns; k++) v->best[k] = v->cslots[base + k];
+                matched = true;
+                if (earliest) return true;
+                // Lower-priority threads lose to this match.
+                break;
+            }
+            if (pos >= n) continue;
+            if (op == I_CHAR) step = cp == (i64)v->x[pc];
+            else if (op == I_ANY) step = cp != '\n';
+            else if (op == I_ANYNL) step = true;
+            else if (op == I_CLASS) step = InClass(g, v->x[pc], cp);
+            if (step) {
+                for (i32 k = 0; k < v->ns; k++) v->scratch[k] = v->cslots[base + k];
+                Follow(g, v, true, pc + 1, pos + w);
+            }
+        }
+        v->cdense <> v->ndense;
+        v->csparse <> v->nsparse;
+        v->cslots <> v->nslots;
+        v->clen = v->nlen;
+        v->nlen = 0;
+        if (pos >= n) break;
+        pos += w;
+    }
+    return matched;
+}
+
+// ---------------------------------------------------------------------------
+// API.
+// ---------------------------------------------------------------------------
+
+// A match: its byte offsets in the text and the text matched (a view).
+struct Match {
+    usize start;
+    usize end;
+    string text;
+};
+
+static Match MakeMatch(string hay, i64 a, i64 b)
+{
+    Match m;
+    m.start = (usize)a;
+    m.end = (usize)b;
+    m.text = hay[(isize)a:(isize)b];
+    return m;
+}
+
+// The groups of a match: group 0 is the whole match.
+struct Captures {
+    string hay;
+    list<i64> slots;
+    list<string> names;
+
+    // The number of groups, the whole match included.
+    i32 len(struct Captures *self)
+    {
+        return (i32)self->names.size;
+    }
+
+    // Group i, or None when it took no part in the match (or there is none).
+    Option<Match> get(struct Captures *self, i32 i)
+    {
+        if (i < 0 || i >= (i32)self->names.size) return None;
+        i64 a = self->slots[2 * i];
+        i64 b = self->slots[2 * i + 1];
+        if (a < 0 || b < 0) return None;
+        return Some(MakeMatch(self->hay, a, b));
+    }
+
+    // The group named `name`.
+    Option<Match> name(struct Captures *self, string name)
+    {
+        for (i32 k = 1; k < (i32)self->names.size; k++) {
+            if (self->names[k] == name) return self->get(k);
+        }
+        return None;
+    }
+
+    // Group i's text, "" when it took no part in the match.
+    string group(struct Captures *self, i32 i)
+    {
+        if (i < 0 || i >= (i32)self->names.size) return "";
+        i64 a = self->slots[2 * i];
+        i64 b = self->slots[2 * i + 1];
+        if (a < 0 || b < 0) return "";
+        return self->hay[(isize)a:(isize)b];
+    }
+};
+
+static Captures MakeCaptures(Vm *v, list<string> names)
+{
+    Captures c;
+    c.hay = v->hay;
+    c.names = names;
+    for (i32 k = 0; k < v->ns; k++) c.slots.add(v->best[k]);
+    return c;
+}
+
+// Append `rep` to `b` with `$1`, `${name}` and `$name` replaced by the groups of
+// `c` (an unknown group is empty) and `$$` by `$`.
+static void Expand(stringbuilder *b, string rep, Captures *c)
+{
+    i64 n = (i64)rep.size;
+    i64 lit = 0;
+    i64 i = 0;
+    while (i < n) {
+        if (rep[i] != '$' || i + 1 >= n) { i++; continue; }
+        *b += rep[lit:i];
+        char d = rep[i + 1];
+        if (d == '$') {
+            *b += "$";
+            i += 2;
+            lit = i;
+            continue;
+        }
+        i64 a = i + 1;
+        i64 e = a;
+        i64 next = a;
+        if (d == '{') {
+            a = i + 2;
+            e = a;
+            while (e < n && rep[e] != '}') e++;
+            if (e >= n) { i++; lit = i - 1; continue; }
+            next = e + 1;
+        } else {
+            while (e < n && IsWordByte((i64)(u8)rep[e])) e++;
+            next = e;
+        }
+        if (e == a) {
+            // A `$` with no name is itself.
+            *b += "$";
+            i = next;
+            lit = i;
+            continue;
+        }
+        string id = rep[a:e];
+        bool digits = true;
+        i32 num = 0;
+        for (i64 k = 0; k < (i64)id.size; k++) {
+            if (id[k] < '0' || id[k] > '9') digits = false;
+            else if (num < 100000) num = num * 10 + (id[k] - '0');
+        }
+        if (digits) *b += c->group(num);
+        else {
+            match (c->name(id)) {
+                Some(m): *b += m.text;
+                None: {}
+            }
+        }
+        i = next;
+        lit = i;
+    }
+    *b += rep[lit:];
+}
+
+// Each successive non-overlapping match. An empty match may follow a non-empty
+// one directly, but not another empty one at the same place (as Python).
+struct Matches {
+    Prog prog;
+    Vm vm;
+    i64 pos;
+    i64 no_empty;
+    bool done;
+
+    Iterator<Match> next(struct Matches *self)
+    {
+        if (self->done || self->pos > self->vm.len) return Iterator::Stop;
+        if (!Search(&self->prog, &self->vm, self->pos, false, false, self->no_empty, false)) {
+            self->done = true;
+            return Iterator::Stop;
+        }
+        i64 a = self->vm.best[0];
+        i64 b = self->vm.best[1];
+        self->no_empty = a == b ? b : -1;
+        self->pos = b;
+        return Iterator::Next(MakeMatch(self->vm.hay, a, b));
+    }
+};
+
+// The groups of each successive match (see Matches).
+struct CaptureMatches {
+    Prog prog;
+    Vm vm;
+    list<string> names;
+    i64 pos;
+    i64 no_empty;
+    bool done;
+
+    Iterator<Captures> next(struct CaptureMatches *self)
+    {
+        if (self->done || self->pos > self->vm.len) return Iterator::Stop;
+        if (!Search(&self->prog, &self->vm, self->pos, false, false, self->no_empty, false)) {
+            self->done = true;
+            return Iterator::Stop;
+        }
+        i64 a = self->vm.best[0];
+        i64 b = self->vm.best[1];
+        self->no_empty = a == b ? b : -1;
+        self->pos = b;
+        return Iterator::Next(MakeCaptures(&self->vm, self->names));
+    }
+};
+
+// A compiled regular expression (re::Compile). It does not change once
+// compiled, so one may be shared between threads.
+struct Regex {
+    Prog prog;
+    list<string> names;
+    string pattern;
+
+    // The pattern it was compiled from.
+    string as_str(struct Regex *self)
+    {
+        return self->pattern;
+    }
+
+    // The number of groups, the whole match (group 0) included.
+    i32 captures_len(struct Regex *self)
+    {
+        return (i32)self->names.size;
+    }
+
+    // Whether the pattern matches anywhere in s.
+    bool is_match(struct Regex *self, string s)
+    {
+        Vm v = NewVm(&self->prog);
+        v.hay = s;
+        v.len = (i64)s.size;
+        return Search(&self->prog, &v, 0, false, false, -1, true);
+    }
+
+    // The leftmost match in s.
+    Option<Match> find(struct Regex *self, string s)
+    {
+        return self->find_at(s, 0);
+    }
+
+    // The leftmost match in s at or after byte `start`. What comes before
+    // `start` still counts for `^` and `\b`.
+    Option<Match> find_at(struct Regex *self, string s, usize start)
+    {
+        if (start > s.size) return None;
+        Vm v = NewVm(&self->prog);
+        v.hay = s;
+        v.len = (i64)s.size;
+        if (!Search(&self->prog, &v, (i64)start, false, false, -1, false)) return None;
+        return Some(MakeMatch(s, v.best[0], v.best[1]));
+    }
+
+    // A match of all of s (Python's fullmatch).
+    Option<Match> fullmatch(struct Regex *self, string s)
+    {
+        Vm v = NewVm(&self->prog);
+        v.hay = s;
+        v.len = (i64)s.size;
+        if (!Search(&self->prog, &v, 0, true, true, -1, false)) return None;
+        return Some(MakeMatch(s, v.best[0], v.best[1]));
+    }
+
+    // The groups of the leftmost match in s.
+    Option<Captures> captures(struct Regex *self, string s)
+    {
+        return self->captures_at(s, 0);
+    }
+
+    Option<Captures> captures_at(struct Regex *self, string s, usize start)
+    {
+        if (start > s.size) return None;
+        Vm v = NewVm(&self->prog);
+        v.hay = s;
+        v.len = (i64)s.size;
+        if (!Search(&self->prog, &v, (i64)start, false, false, -1, false)) return None;
+        return Some(MakeCaptures(&v, self->names));
+    }
+
+    // Each successive non-overlapping match in s.
+    Matches find_iter(struct Regex *self, string s)
+    {
+        Matches it;
+        it.prog = self->prog;
+        it.vm = NewVm(&self->prog);
+        it.vm.hay = s;
+        it.vm.len = (i64)s.size;
+        it.pos = 0;
+        it.no_empty = -1;
+        it.done = false;
+        return it;
+    }
+
+    // The groups of each successive non-overlapping match in s.
+    CaptureMatches captures_iter(struct Regex *self, string s)
+    {
+        CaptureMatches it;
+        it.prog = self->prog;
+        it.vm = NewVm(&self->prog);
+        it.vm.hay = s;
+        it.vm.len = (i64)s.size;
+        it.names = self->names;
+        it.pos = 0;
+        it.no_empty = -1;
+        it.done = false;
+        return it;
+    }
+
+    // All the matches of find_iter.
+    list<Match> find_all(struct Regex *self, string s)
+    {
+        list<Match> out;
+        for (auto m : self->find_iter(s)) out.add(m);
+        return out;
+    }
+
+    // s with the first `limit` matches (all with a negative limit) replaced by
+    // `rep`, where `$1`, `${name}` and `$name` are groups and `$$` is `$`.
+    string replacen(struct Regex *self, string s, i32 limit, string rep)
+    {
+        stringbuilder b;
+        i64 last = 0;
+        i32 done = 0;
+        for (auto c : self->captures_iter(s)) {
+            if (limit >= 0 && done >= limit) break;
+            i64 a = c.slots[0];
+            b += s[(isize)last:(isize)a];
+            Expand(&b, rep, &c);
+            last = c.slots[1];
+            done++;
+        }
+        b += s[(isize)last:];
+        return b.build();
+    }
+
+    // s with its first match replaced (see replacen).
+    string replace(struct Regex *self, string s, string rep)
+    {
+        return self->replacen(s, 1, rep);
+    }
+
+    // s with every match replaced (see replacen).
+    string replace_all(struct Regex *self, string s, string rep)
+    {
+        return self->replacen(s, -1, rep);
+    }
+
+    // The pieces of s between the matches.
+    list<string> split(struct Regex *self, string s)
+    {
+        return self->splitn(s, -1);
+    }
+
+    // At most `limit` pieces of s (all with a negative limit): the last is the
+    // rest of s.
+    list<string> splitn(struct Regex *self, string s, i32 limit)
+    {
+        list<string> out;
+        if (limit == 0) return out;
+        i64 last = 0;
+        for (auto m : self->find_iter(s)) {
+            if (limit > 0 && (i32)out.size + 1 >= limit) break;
+            out.add(s[(isize)last:(isize)m.start]);
+            last = (i64)m.end;
+        }
+        out.add(s[(isize)last:]);
+        return out;
+    }
+};
+
+// Compile `pattern`, or an error message with the position (in code points).
+Result<Regex, string> Compile(string pattern)
+{
+    Parser p;
+    p.src = pattern;
+    i64 n = (i64)pattern.size;
+    i64 i = 0;
+    while (i < n) {
+        i64 d = Decode(pattern, i, n);
+        p.pat.add((i32)(d >> 3));
+        p.off.add((i32)i);
+        i += d & 7;
+    }
+    p.off.add((i32)n);
+    p.names.add("");
+    i32 root = ParseAlt(&p);
+    if (root >= 0 && !AtEnd(&p)) Fail(&p, "unbalanced parenthesis", p.i);
+    if (!p.err.is_empty()) return Err(p.err);
+    Emit(&p, I_SAVE, 0, 0);
+    CompileNode(&p, root);
+    Emit(&p, I_SAVE, 1, 0);
+    Emit(&p, I_MATCH, 0, 0);
+    if (!p.err.is_empty()) return Err(p.err);
+    p.prog.nslots = 2 * (i32)p.names.size;
+    p.prog.first = FirstByte(&p.prog);
+    Regex r;
+    r.prog = p.prog;
+    r.names = p.names;
+    r.pattern = pattern;
+    return Ok(r);
+}
+
+// s with every character that has a meaning in a pattern escaped, so that it
+// matches itself.
+string Escape(string s)
+{
+    stringbuilder b;
+    i64 lit = 0;
+    for (i64 i = 0; i < (i64)s.size; i++) {
+        char c = s[i];
+        if (c == '\\' || c == '.' || c == '+' || c == '*' || c == '?' || c == '(' || c == ')'
+            || c == '|' || c == '[' || c == ']' || c == '{' || c == '}' || c == '^' || c == '$'
+            || c == '#' || c == '&' || c == '-' || c == '~' || c == ' ') {
+            b += s[lit:i];
+            b += "\\";
+            lit = i;
+        }
+    }
+    b += s[lit:];
+    return b.build();
+}

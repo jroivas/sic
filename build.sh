@@ -79,7 +79,7 @@ SIC="$ROOT/siccomp/target/$PROFILE/sic"
 # The sysroot the compiler derives from its own path: <exe_dir>/../lib/sic.
 SYSROOT="$ROOT/siccomp/target/lib/sic"
 
-# Preprocess std and art (and bootstrap sic-cpp) with the system cpp when
+# Preprocess std, art and re (and bootstrap sic-cpp) with the system cpp when
 # there is one: the existing sic-cpp links libstd, so once std is reinstalled a
 # stale sic-cpp built against the previous libstd can fail to load (an API
 # rename removed a symbol it uses) and break every later step.
@@ -101,17 +101,20 @@ build_modules() {
     [ -f "$ROOT/siccomp/lib/std/module.conf" ] && cp "$ROOT/siccomp/lib/std/module.conf" "$SYSROOT/"
     "$SIC" -O2 --emit-module "$SYSROOT"
 
-    echo ">> building + installing art (async runtime) into $SYSROOT"
-    # art declares its own module, so it can't share std's emit dir (one module per
-    # folder). Build it in a scratch dir, then install into the sysroot with the baked
+    # art (the async runtime) and re (regular expressions) declare modules of
+    # their own, so they can't share std's emit dir (one module per folder). Each
+    # is built in a scratch dir, then installed into the sysroot with the baked
     # -L/-rpath rewritten to point at the sysroot.
-    ART_BUILD="$ROOT/siccomp/target/art_build"
-    rm -rf "$ART_BUILD"; mkdir -p "$ART_BUILD"
-    cp "$ROOT"/siccomp/lib/art/*.sic "$ART_BUILD/"
-    "$SIC" -O2 --emit-module "$ART_BUILD"
-    cp "$ART_BUILD"/libart.* "$SYSROOT/"
-    sed "s|$ART_BUILD|$SYSROOT|g" "$ART_BUILD/module_art.smod" > "$SYSROOT/module_art.smod"
-    [ -f "$ART_BUILD/module_art.h" ] && cp "$ART_BUILD/module_art.h" "$SYSROOT/"
+    for mod in art re; do
+        echo ">> building + installing $mod into $SYSROOT"
+        MOD_BUILD="$ROOT/siccomp/target/${mod}_build"
+        rm -rf "$MOD_BUILD"; mkdir -p "$MOD_BUILD"
+        cp "$ROOT"/siccomp/lib/$mod/*.sic "$MOD_BUILD/"
+        "$SIC" -O2 --emit-module "$MOD_BUILD"
+        cp "$MOD_BUILD"/lib$mod.* "$SYSROOT/"
+        sed "s|$MOD_BUILD|$SYSROOT|g" "$MOD_BUILD/module_$mod.smod" > "$SYSROOT/module_$mod.smod"
+        [ -f "$MOD_BUILD/module_$mod.h" ] && cp "$MOD_BUILD/module_$mod.h" "$SYSROOT/"
+    done
 }
 
 build_modules
@@ -128,10 +131,10 @@ echo ">> building the compiler again, with sicpp built in"
 build_compiler
 
 if [ -n "$BOOT_CPP" ]; then
-    # Stage 2: rebuild std and art with the fresh preprocessor, the one they are
+    # Stage 2: rebuild std, art and re with the fresh preprocessor, the one they are
     # normally built with (the system cpp only bootstrapped them).
     unset SIC_CPP
-    echo ">> rebuilding std + art with the new preprocessor"
+    echo ">> rebuilding std, art and re with the new preprocessor"
     build_modules
     build_compiler
 fi
@@ -142,6 +145,7 @@ make -B -C "$ROOT/sic-fmt" SIC="$SIC"
 echo ">> done. installed:"
 ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
       "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so \
+      "$SYSROOT"/module_re.smod "$SYSROOT"/libre.a "$SYSROOT"/libre.so \
       "$ROOT/sic-cpp/sic-cpp" "$ROOT/sic-fmt/sic-fmt"
 echo ">> back ends: $("$SIC" -print-backends | tr '\n' ' ')"
 echo ">> preprocessor built in: $("$SIC" -print-cpp-builtin), command: $("$SIC" -print-prog-name=cpp)"
