@@ -10,7 +10,7 @@ standard library, with the top-level script:
 ```
 
 `build.sh` runs `cargo build` in `siccomp/`, then compiles the SIC standard
-library (`siccomp/lib/std/std.sic`) into the compiler's module sysroot so
+library (`lib/std/std.sic`) into the compiler's module sysroot so
 `import std;` works with no extra flags. To build just the compiler:
 
 ```sh

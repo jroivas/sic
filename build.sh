@@ -96,9 +96,9 @@ build_modules() {
     # behind in the sysroot and keep being compiled into libstd (it did: a removed
     # math.sic left `acos` unresolved in libstd.so, breaking sic-cpp).
     rm -f "$SYSROOT"/*.sic "$SYSROOT/module.conf"
-    cp "$ROOT"/siccomp/lib/std/*.sic "$SYSROOT/"
+    cp "$ROOT"/lib/std/*.sic "$SYSROOT/"
     # The module's build settings (link flags, pkg-config packages, cflags).
-    [ -f "$ROOT/siccomp/lib/std/module.conf" ] && cp "$ROOT/siccomp/lib/std/module.conf" "$SYSROOT/"
+    [ -f "$ROOT/lib/std/module.conf" ] && cp "$ROOT/lib/std/module.conf" "$SYSROOT/"
     "$SIC" -O2 --emit-module "$SYSROOT"
 
     # art (the async runtime) and re (regular expressions) declare modules of
@@ -109,7 +109,7 @@ build_modules() {
         echo ">> building + installing $mod into $SYSROOT"
         MOD_BUILD="$ROOT/siccomp/target/${mod}_build"
         rm -rf "$MOD_BUILD"; mkdir -p "$MOD_BUILD"
-        cp "$ROOT"/siccomp/lib/$mod/*.sic "$MOD_BUILD/"
+        cp "$ROOT"/lib/$mod/*.sic "$MOD_BUILD/"
         "$SIC" -O2 --emit-module "$MOD_BUILD"
         cp "$MOD_BUILD"/lib$mod.* "$SYSROOT/"
         sed "s|$MOD_BUILD|$SYSROOT|g" "$MOD_BUILD/module_$mod.smod" > "$SYSROOT/module_$mod.smod"

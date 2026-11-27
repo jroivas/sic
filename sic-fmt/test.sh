@@ -63,7 +63,7 @@ while IFS= read -r f; do
     if ! "$FMT" < "$f" > "$TMP/once" 2> "$TMP/err"; then bad "$rel" "$(cat "$TMP/err")"; continue; fi
     "$FMT" < "$TMP/once" > "$TMP/twice" 2>/dev/null
     cmp -s "$TMP/once" "$TMP/twice" || bad "$rel" "not stable"
-done < <(find "$REPO/tests" "$REPO/siccomp/lib" "$REPO/sic-cpp/src" "$REPO/sic-fmt/src" "$REPO/module_test" \
+done < <(find "$REPO/tests" "$REPO/lib" "$REPO/sic-cpp/src" "$REPO/sic-fmt/src" "$REPO/module_test" \
              -name '*.sic' -not -path '*/target/*' | sort)
 [ $fail -eq 0 ] && echo "repository: $n files formatted, all stable"
 

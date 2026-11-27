@@ -350,7 +350,7 @@ mechanism available to your own code.
 
 ## How it's written
 
-`Fmt` is plain SIC (`siccomp/lib/std/std.sic`). Its core is a
+`Fmt` is plain SIC (`lib/std/std.sic`). Its core is a
 `match (type(x))` that renders one boxed argument, borrowing string/`char*`
 arguments (no copy) and formatting the rest into a local buffer (copied out on
 return automatically — see

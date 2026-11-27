@@ -223,7 +223,7 @@ fi
 #    search path (`$SIC_MODULE_PATH`) — no blessed special case. `std.Fmt`/`Print`/
 #    `Println` are plain calls; formatting is done in SIC by dispatching on each
 #    arg's runtime type. Verified by stdout + exit code, both dynamic and -static.
-STD_SRC="$ROOT/siccomp/lib/std"
+STD_SRC="$ROOT/lib/std"
 mkdir -p sysroot
 cp "$STD_SRC"/*.sic sysroot/
 [ -f "$STD_SRC/module.conf" ] && cp "$STD_SRC/module.conf" sysroot/
@@ -1171,7 +1171,7 @@ fi
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
-ART_SRC="$ROOT/siccomp/lib/art"
+ART_SRC="$ROOT/lib/art"
 mkdir -p arun; cp "$ART_SRC"/*.sic arun/
 if "$SIC" --emit-module arun 2>err && [ -f arun/module_art.smod ]; then
     ok "art-build"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests of the re module (siccomp/lib/re): the API (api.sic against
+# Tests of the re module (lib/re): the API (api.sic against
 # api.expected) and a differential test against Python's re (run.sic over
 # cases.txt against expected.txt, both made by gen.py). Python is not needed
 # to run them.
@@ -10,7 +10,7 @@ SIC=${SIC:-$D/../../siccomp/target/release/sic}
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir "$W/re"
-cp "$D/../../siccomp/lib/re/re.sic" "$W/re/"
+cp "$D/../../lib/re/re.sic" "$W/re/"
 "$SIC" -O2 --emit-module "$W/re" > "$W/err" 2>&1 || { echo "FAIL re: module build"; cat "$W/err"; exit 1; }
 fail=0
 for o in -O0 -O2; do
