@@ -130,4 +130,7 @@ pub trait Backend {
     /// Whether it writes assembler text when [`BackendOptions::assembly`] asks
     /// (else the driver writes the object back as text).
     fn writes_assembly(&self) -> bool { false }
+
+    /// Whether it is written in SIC (its letter in the compiler's identifier).
+    fn sic(&self) -> bool { false }
 }

@@ -74,6 +74,10 @@ pub struct Stages {
     /// The back ends: the first is the default, unless the build's back-end
     /// order (`SIC_BACKEND_ORDER`) says otherwise.
     pub backends: fn() -> Vec<Box<dyn Backend>>,
+    /// The stages above that run in SIC, by their letters in the compiler's
+    /// identifier (see [`compiler_id`]): `l` lex, `p` parse, `i` lower, `o` the
+    /// passes. The back end's is [`Backend::sic`].
+    pub sic: &'static str,
 }
 
 impl Stages {
@@ -85,7 +89,24 @@ impl Stages {
         lower: |lowerer, tu| lowerer.lower(tu),
         ir_passes: sic_opt::run_ir_passes,
         backends: rust_backends,
+        sic: "",
     };
+}
+
+/// The compiler's identifier: a letter per part, in pipeline order, uppercase
+/// when the part is written in SIC and lowercase when in Rust: `c` the
+/// preprocessor (`-` when it is not sicpp: the system's), `l` the lexer, `p` the
+/// parser, `i` the lowering to IR, `o` the optimizer, `b` the back end in use, `d`
+/// the driver. siccomp's compiler is `Clpiobd`: only the preprocessor is SIC.
+pub fn compiler_id(backend: &dyn Backend) -> String {
+    let cmd = sic_frontend::preprocessor_cmd();
+    let sicpp = cmd.first().map_or(true, |c| sic_frontend::preprocess::is_sic_cpp(c));
+    let mut id = String::from(if sicpp { 'C' } else { '-' });
+    for c in "lpiobd".chars() {
+        let sic = if c == 'b' { backend.sic() } else { stages().sic.contains(c) };
+        id.push(if sic { c.to_ascii_uppercase() } else { c });
+    }
+    id
 }
 
 static STAGES: std::sync::OnceLock<Stages> = std::sync::OnceLock::new();
@@ -467,12 +488,13 @@ fn handle_version_query(args: &[String]) -> bool {
                 // clang-like banner.
                 // Linux shows this line in /proc/version, and needs `clang` in it.
                 let flag = args.iter().rev().find_map(|a| a.strip_prefix("-fbackend=")).map(String::from);
-                let backend = match flag.or_else(|| std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty())) {
-                    Some(v) if available_backends().iter().any(|b| b.name() == v) => v,
-                    _ => available_backends()[0].name().to_string(),
-                };
-                let backend = if backend == "llvm" { "LLVM" } else { "Cranelift" };
-                println!("sic version {} (SIC Compiler, clang compatible, {})", version, backend);
+                let mut backends = available_backends();
+                let i = flag.or_else(|| std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty()))
+                    .and_then(|v| backends.iter().position(|b| b.name() == v)).unwrap_or(0);
+                let backend = backends.swap_remove(i);
+                let name = if backend.name() == "llvm" { "LLVM" } else { "Cranelift" };
+                println!("sic version {} (SIC Compiler, clang compatible, {}, {})",
+                    version, name, compiler_id(backend.as_ref()));
                 println!("Target: {}", target_triple());
                 println!("Thread model: posix");
                 return true;
