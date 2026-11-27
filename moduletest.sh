@@ -1991,13 +1991,14 @@ printf 'int seven(void);\nint main(void) { return seven(); }\n' > main.txt
 if [ "$rc" = 7 ]; then ok "lo-link-input"; else bad "lo-link-input" "rc=$rc $(head -5 err)"; fi
 cd ..
 
-# ── --version names the back end in use (Linux's /proc/version), and `clang` ──
+# ── --version names the back end in use (Linux's /proc/version), `clang`, and
+# the compiler's identifier (doc/version.md) ──
 for b in $("$SIC" -print-backends); do
     case $b in llvm) want=LLVM ;; *) want=Cranelift ;; esac
     v="$(SIC_BACKEND=$b "$SIC" --version | head -1)"
-    case "$v" in *"clang compatible, $want)"*) ok "version-$b" ;; *) bad "version-$b" "$v" ;; esac
+    case "$v" in *"clang compatible, $want, "[C-][Ll][Pp][Ii][Oo][Bb][Dd]")") ok "version-$b" ;; *) bad "version-$b" "$v" ;; esac
     v="$(SIC_BACKEND=nonsense "$SIC" -fbackend=$b --version | head -1)"
-    case "$v" in *"clang compatible, $want)"*) ok "version-flag-$b" ;; *) bad "version-flag-$b" "$v" ;; esac
+    case "$v" in *"clang compatible, $want, "[C-][Ll][Pp][Ii][Oo][Bb][Dd]")") ok "version-flag-$b" ;; *) bad "version-flag-$b" "$v" ;; esac
 done
 
 # ── an array parameter is a pointer, in a function type too: not a vector under
