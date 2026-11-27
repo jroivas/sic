@@ -3,9 +3,13 @@
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_void};
 
-extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-    fn free(p: *mut c_void);
+// In a module of their own: the module's functions may be called `malloc`/`free`.
+mod __sic_libc {
+    use std::os::raw::c_void;
+    extern "C" {
+        pub fn malloc(size: usize) -> *mut c_void;
+        pub fn free(p: *mut c_void);
+    }
 }
 
 const FOREIGN: u64 = 1 << 63;
@@ -45,7 +49,7 @@ impl SicString {
     pub fn new(bytes: impl AsRef<[u8]>) -> SicString {
         let b = bytes.as_ref();
         unsafe {
-            let block = malloc(8 + b.len() + 1) as *mut u64;
+            let block = __sic_libc::malloc(8 + b.len() + 1) as *mut u64;
             *block = 1;
             let text = block.add(1) as *mut u8;
             std::ptr::copy_nonoverlapping(b.as_ptr(), text, b.len());
@@ -85,7 +89,7 @@ impl Drop for SicString {
                 let finalize: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(*rc.add(1));
                 finalize(rc as *mut c_void);
             } else {
-                free(rc as *mut c_void);
+                __sic_libc::free(rc as *mut c_void);
             }
         }
     }

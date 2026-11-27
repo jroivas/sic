@@ -3,8 +3,9 @@
 //! module's manifest, and the crate depends on nothing but the module's libraries.
 //!
 //! A function comes across when all its types do: integers, floats, `bool`, `string`,
-//! `list` of those, and structs of those. Anything else is left out, with a comment
-//! in the crate saying so.
+//! `list` of those, and structs of those (a struct's field may also point to an
+//! integer or float: a raw pointer in Rust). Anything else is left out, with a
+//! comment in the crate saying so.
 
 use sic_frontend::ModuleManifest;
 use sic_ir::{StructType, Type};
@@ -77,6 +78,12 @@ fn list_elem(name: &str) -> Option<String> {
     })
 }
 
+/// A pointer to a scalar, as a raw pointer: `*mut u32`.
+fn scalar_ptr(t: &Type) -> Option<String> {
+    let Type::Pointer(p) = t else { return None };
+    scalar(p).map(|s| format!("*mut {}", s))
+}
+
 fn map_type(t: &Type, m: &ModuleManifest) -> Option<Ty> {
     if matches!(t, Type::Void) { return Some(Ty::Void); }
     if let Some(s) = scalar(t) { return Some(Ty::Plain(s)); }
@@ -100,7 +107,7 @@ fn struct_of(name: &str, m: &ModuleManifest) -> Option<String> {
     for (_, t) in &st.fields {
         match t {
             Type::Struct(s) if s.name.as_deref() == Some("__sic_string") => {}
-            t if scalar(t).is_some() => {}
+            t if scalar(t).is_some() || scalar_ptr(t).is_some() => {}
             _ => return None,
         }
     }
@@ -136,7 +143,7 @@ fn gen_struct(out: &mut String, name: &str, st: &StructType, m: &ModuleManifest,
     let _ = writeln!(out, "\n/// `{name}`, with its fields in SIC's physical order.\n#[repr(C)]\npub struct {rust} {{");
     for &i in &order {
         let (fname, t) = &st.fields[i];
-        let ty = scalar(t).unwrap_or_else(|| "SicStr".to_string());
+        let ty = scalar(t).or_else(|| scalar_ptr(t)).unwrap_or_else(|| "SicStr".to_string());
         let _ = writeln!(out, "    pub {}: {},", ident(fname), ty);
     }
     let _ = writeln!(out, "    _not_send: PhantomData<*const ()>,\n}}");

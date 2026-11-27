@@ -1601,6 +1601,9 @@ string keep_it = "";
 void keep(string s) { keep_it = s; }
 string kept() { return keep_it; }
 i32 not_for_rust(any a) { return 1; }
+struct buf { usize n; u32 *data; }
+buf squares(u32 n) { buf b; b.n = n; b.data = new u32(n); for (u32 i = 0; i < n; i++) b.data[i] = i * i; return b; }
+void Free(buf *b) { del b->data; b->data = NULL; }
 EOF
     cat > app/Cargo.toml <<'EOF'
 [package]
@@ -1633,6 +1636,11 @@ fn main() {
     let d = c.clone();
     drop(c);
     assert_eq!(d.as_bytes(), b"hello twice");
+    // A field pointing to integers is a raw pointer; `Free` is `free` in Rust.
+    let mut b = squares(4);
+    assert_eq!(unsafe { std::slice::from_raw_parts(b.data, b.n as usize) }, &[0, 1, 4, 9]);
+    free(&mut b);
+    assert!(b.data.is_null());
 }
 EOF
     if "$SIC" -O2 --emit-crate geom 2>err; then

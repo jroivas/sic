@@ -25,7 +25,7 @@ impl SicElem for SicString {
     // An element's own block: [count][the descriptor][bytes], as the compiler boxes it.
     unsafe fn push(l: *mut c_void, v: Self) {
         let b = v.as_bytes();
-        let block = malloc(8 + 24 + b.len() + 1) as *mut u64;
+        let block = __sic_libc::malloc(8 + 24 + b.len() + 1) as *mut u64;
         *block = 1;
         let desc = block.add(1) as *mut SicStr;
         let text = block.add(4) as *mut u8;
