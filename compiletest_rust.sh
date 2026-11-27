@@ -106,7 +106,7 @@ dotest() {
     fi
     # `.skip-llvm`: optimized code from LLVM differs where C allows it; the first
     # line says how.
-    if [ "${SIC_BACKEND:-}" = llvm ] && [ -f "$test.skip-llvm" ] && [[ " ${CFLAGS:-} " != *" -O0 "* ]]; then
+    if [ "$BACKEND" = llvm ] && [ -f "$test.skip-llvm" ] && [[ " ${CFLAGS:-} " != *" -O0 "* ]]; then
         echo "PASS $base (skipped on LLVM)"
         return 0
     fi
