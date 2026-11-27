@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# The driver is a library, so a driver with other stages can reuse it (sic/franken).
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "sic"
 path = "src/main.rs"

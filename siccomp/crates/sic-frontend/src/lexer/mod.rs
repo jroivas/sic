@@ -66,6 +66,9 @@ impl Lexer {
     /// construct from token char-index ranges (`Token::start`/`end`).
     pub fn source_chars(&self) -> &[char] { &self.src }
 
+    /// The source as a character vector, taken out of the lexer.
+    pub fn into_source_chars(self) -> Vec<char> { self.src }
+
     /// Tokenize all input and return the token stream (excludes whitespace/comments).
     pub fn tokenize(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
