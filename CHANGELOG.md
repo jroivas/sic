@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-27)
 
 ### Compatibility
 
@@ -89,7 +89,10 @@
   2147483647).
 - A `new[]` array read in a loop is hoisted out of it only when every
   iteration makes it: one under an `if` was made — and bounds-checked —
-  before the loop.
+  before the loop. A hoisted read is also one nothing the program can see
+  precedes, so a failing bounds check stops the program where the loop would
+  have (it stopped before the calls ahead of it), and the loop's condition
+  runs as often as before (a call in it ran once more).
 - System V calls of structs and unions now match GCC: one passed through `...`
   goes by value (in registers or on the stack, and `va_arg` reads it from
   there), where sic passed and read its address; and one whose eightbytes no
