@@ -193,6 +193,11 @@ struct Args {
     #[arg(long = "ast")]
     ast: bool,
 
+    /// `-dump-tokens`: write the tokens of each source, one per line, and stop
+    /// (for comparing lexers).
+    #[arg(long = "dump-tokens", hide = true)]
+    dump_tokens: bool,
+
     /// Enable debug output
     #[arg(short = 'd', long = "debug")]
     debug: bool,
@@ -649,7 +654,9 @@ pub fn main_with(stages: Stages) {
     let mut given: Vec<String> = Vec::new();
     while let Some(a) = iter.next() {
         given.push(a.clone());
-        if a == "-pedantic" || a == "-pedantic-errors" {
+        if a == "-dump-tokens" {
+            argv.push("--dump-tokens".to_string());
+        } else if a == "-pedantic" || a == "-pedantic-errors" {
             // gcc spellings of -Wpedantic (+ -Werror=pedantic); single-dash long
             // options clap cannot parse.
             argv.push("-Wpedantic".to_string());
@@ -1170,12 +1177,32 @@ fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std:
     else { Err(format!("assembler failed with exit code {:?}", status.code()).into()) }
 }
 
-/// Preprocess, lex and parse one source into a translation unit, returning it
-/// with the source language selected from the file extension.
-fn parse_source(
-    path: &str,
-    args: &Args,
-) -> Result<(sic_frontend::ast::TranslationUnit, sic_frontend::Lang), Box<dyn std::error::Error>> {
+/// `-dump-tokens`: one line per token, `kind line:col start..end pack hidden
+/// text` (tab-separated, the text quoted: printable ASCII but `"` and `\` as it
+/// is, every other byte `\xNN`, since a token's text need not be UTF-8); a line
+/// `# file NAME` before the first token of each file the spans name.
+fn write_tokens(out: &mut impl IoWrite, tokens: &[Token]) -> std::io::Result<()> {
+    let mut file: Option<&str> = None;
+    for (i, t) in tokens.iter().enumerate() {
+        let f = t.span.file.as_deref();
+        if i == 0 || f != file {
+            writeln!(out, "# file {}", f.unwrap_or("-"))?;
+            file = f;
+        }
+        write!(out, "{:?}\t{}:{}\t{}..{}\t{}\t{}\t\"",
+            t.kind, t.span.line, t.span.col, t.start, t.end, t.pack, t.hidden as u8)?;
+        for &c in t.text.as_bytes() {
+            if (b' '..=b'~').contains(&c) && c != b'"' && c != b'\\' { out.write_all(&[c])?; }
+            else { write!(out, "\\x{:02x}", c)?; }
+        }
+        writeln!(out, "\"")?;
+    }
+    Ok(())
+}
+
+/// Preprocess and lex one source: its tokens, its text as characters, and the
+/// language selected from the file extension.
+fn lex_source(path: &str, args: &Args) -> Result<(Vec<Token>, Vec<char>, Lang), Box<dyn std::error::Error>> {
     // Forward dependency-generation flags (`-MD`/`-MF`/...) so cpp writes the
     // `.d` file as a side effect of preprocessing.
     let dep_owned = effective_dep_flags(args);
@@ -1295,6 +1322,16 @@ fn parse_source(
 
     let (tokens, chars) = (stages().lex)(&preprocessed, lang, std_has_c23_keywords(&args.std))
         .map_err(|e| format!("{}", e))?;
+    Ok((tokens, chars, lang))
+}
+
+/// Preprocess, lex and parse one source into a translation unit, returning it
+/// with the source language selected from the file extension.
+fn parse_source(
+    path: &str,
+    args: &Args,
+) -> Result<(sic_frontend::ast::TranslationUnit, sic_frontend::Lang), Box<dyn std::error::Error>> {
+    let (tokens, chars, lang) = lex_source(path, args)?;
     let mut tu = (stages().parse)(tokens, path, lang, &chars).map_err(|e| format!("{}", e))?;
     drop(chars);
 
@@ -2181,6 +2218,21 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(o) if o != "-" => fs::write(o, out_text)?,
             _ => print!("{}", out_text),
         }
+        return Ok(());
+    }
+
+    // ── Dump tokens (-dump-tokens) ─────────────────────────────────────────────
+    if args.dump_tokens {
+        let mut out: Box<dyn IoWrite> = match &args.output {
+            Some(o) if o != "-" => Box::new(fs::File::create(o)?),
+            _ => Box::new(std::io::stdout().lock()),
+        };
+        let mut out = std::io::BufWriter::new(&mut out);
+        for src in &sources {
+            let (tokens, _, _) = lex_source(src, args)?;
+            write_tokens(&mut out, &tokens)?;
+        }
+        out.flush()?;
         return Ok(());
     }
 
