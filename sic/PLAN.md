@@ -196,6 +196,8 @@ sic/
   PLAN.md          this file
   DIFFERENCES.md   deliberate differences from the Rust compiler
   build.sh         builds every part with siccomp/'s sic, then sic/franken
+  check.sh         check.sh's release suites with the franken compiler
+  target/          franken's build: target/release/sic (+ cargo-sic)
   lexer/           module `lexer`: lexer.sic, tests/
   ir/              module `ir` (step 2)
   llvm/  opt/  parser/  lower/  driver/  ...
@@ -208,8 +210,10 @@ sic/
 
 The order is `./build.sh` (siccomp/, as today), then `sic/build.sh`. The parts
 are compiled by `siccomp/target/release/sic`, which is the bootstrap compiler
-on every commit of main. `sic/franken` uses its own cargo target directory, so
-it never touches siccomp's build.
+on every commit of main. Franken builds into `sic/target`, so it never
+touches siccomp's build; `sic/target` is as deep in the tree as
+`siccomp/target`, which is where sic looks for the repository's `sic-cpp`
+from its own location.
 
 ## First steps
 
@@ -233,7 +237,7 @@ it never touches siccomp's build.
      - the SQLite amalgamation, preprocessed
 5. **`sic/build.sh` and `sic/franken`** with no parts yet. The franken
    compiler is then the bootstrap with nothing swapped, and must pass check.sh
-   as `SIC=sic/franken/target/release/sic`. `-print-parts` and the
+   as `SIC=sic/target/release/sic`. `-print-parts` and the
    `SIC_PARTS` errors are in from the start.
 6. **The lexer in SIC** (`sic/lexer/lexer.sic`, `module lexer`):
    - **Entry point:** `Tokens Lex(string src, i32 lang, bool c23)`.

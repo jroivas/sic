@@ -14,6 +14,10 @@ if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PRO
 export SIC
 # Say which compiler is under test (a stale debug build passed for current is easy to miss).
 echo "compiler: $SIC ($PROFILE, built $(date -r "$SIC" '+%Y-%m-%d %H:%M'), $("$SIC" --version 2>/dev/null | head -1 || echo 'version unknown'))"
+# sic/franken: the stages running in SIC (a compiler without -print-parts has none).
+if parts_table="$("$SIC" -print-parts 2>/dev/null)"; then
+    echo "SIC parts: $(awk 'NR > 1 && $4 == "yes" { printf "%s%s", s, $1; s = "," }' <<< "$parts_table" | grep . || echo none)"
+fi
 CC="${CC:-cc}"
 CFLAGS=${CFLAGS:-}
 # FAILFAST=1: stop at the first failing test and exit non-zero immediately (used by

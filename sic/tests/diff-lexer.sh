@@ -12,7 +12,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-FRANKEN="${FRANKEN:-$ROOT/sic/franken/target/release/sic}"
+FRANKEN="${FRANKEN:-$ROOT/sic/target/release/sic}"
 if [ -z "${A:-}" ] || [ -z "${B:-}" ]; then
     [ -x "$FRANKEN" ] || { echo "no franken compiler at $FRANKEN (sic/build.sh), or set A and B"; exit 2; }
 fi

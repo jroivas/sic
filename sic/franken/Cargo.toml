@@ -1,0 +1,29 @@
+# franken-SIC: siccomp's driver and stages (by path, the same code the bootstrap
+# compiler is built from) with the stages SIC_PARTS names written in SIC. Built
+# by sic/build.sh, which first builds the parts with the bootstrap compiler.
+[package]
+name = "sic-franken"
+version = "0.4.0-dev"
+edition = "2021"
+rust-version = "1.96"
+publish = false
+
+[[bin]]
+name = "sic"
+path = "src/main.rs"
+
+# The back ends, as siccomp's sic has them; sic/build.sh picks the bootstrap's.
+[features]
+default = []
+cranelift = ["sic/cranelift"]
+llvm = ["sic/llvm"]
+
+[dependencies]
+sic = { path = "../../siccomp/crates/sic", default-features = false }
+
+# Its own workspace: not one of siccomp's.
+[workspace]
+
+# As siccomp's: dependencies optimized in debug builds too.
+[profile.dev.package."*"]
+opt-level = 3
