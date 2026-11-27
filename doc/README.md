@@ -62,6 +62,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     wrapping, comments): what `sic-fmt` produces.
 21. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
     `-fbackend=`, how they differ, and `-m32`.
+22. [Versions](version.md) — the release number, the `--version` line and the
+    compiler's identifier (`Clpiobd`), the compiler macros, tags and branches.
 
 ## Design goals
 

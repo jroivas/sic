@@ -4,6 +4,8 @@
 /// A stage that has, or will have, a SIC version.
 pub struct Part {
     pub name: &'static str,
+    /// Its letter in the compiler's identifier (doc/version.md).
+    pub letter: char,
     /// Its SIC version is built into this compiler.
     pub built: bool,
     /// It runs in SIC when `SIC_PARTS` is not set.
@@ -13,11 +15,11 @@ pub struct Part {
 /// When a part comes, its `built` is `cfg!(sic_<name>)` (build.rs's PARTS lists
 /// it) and `stages` puts its function in.
 pub const PARTS: &[Part] = &[
-    Part { name: "lexer", built: false, default: false },
-    Part { name: "parser", built: false, default: false },
-    Part { name: "lower", built: false, default: false },
-    Part { name: "opt", built: false, default: false },
-    Part { name: "llvm", built: false, default: false },
+    Part { name: "lexer", letter: 'l', built: false, default: false },
+    Part { name: "parser", letter: 'p', built: false, default: false },
+    Part { name: "lower", letter: 'i', built: false, default: false },
+    Part { name: "opt", letter: 'o', built: false, default: false },
+    Part { name: "llvm", letter: 'b', built: false, default: false },
 ];
 
 fn names() -> String { PARTS.iter().map(|p| p.name).collect::<Vec<_>>().join(", ") }
@@ -70,7 +72,11 @@ pub fn print(active: &[&str]) {
 }
 
 /// The driver's stages: Rust, with the active ones replaced by their SIC version.
+/// The back end's letter comes from the back end in use (`Backend::sic`).
 pub fn stages(active: &[&str]) -> sic::Stages {
-    let _ = active;
-    sic::Stages::RUST
+    let mut stages = sic::Stages::RUST;
+    let letters: String = PARTS.iter()
+        .filter(|p| p.letter != 'b' && active.contains(&p.name)).map(|p| p.letter).collect();
+    stages.sic = Box::leak(letters.into_boxed_str());
+    stages
 }
