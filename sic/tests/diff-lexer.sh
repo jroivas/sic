@@ -5,8 +5,9 @@
 #   sic/tests/diff-lexer.sh                 franken: SIC_PARTS=none against =lexer
 #   A=cmd B=cmd sic/tests/diff-lexer.sh     any two commands (words are split)
 #
-# Corpus: tests/*.c and *.sic (with their .flags), c-testsuite, lib/, sic-cpp,
-# sic-fmt, tests/re and the SQLite amalgamation ($SQLITE_DIR, default
+# Corpus: the lexer's own cases (sic/tests/lexer), tests/*.c and *.sic (with
+# their .flags), c-testsuite, lib/, sic-cpp, sic-fmt, tests/re and the SQLite
+# amalgamation ($SQLITE_DIR, default
 # ~/install/sqlite; skipped when it is not there). JOBS=N runs N at once
 # (default: the CPUs). KEEP=1 keeps the work directory. Exits 1 on a difference.
 set -u
@@ -26,7 +27,7 @@ W="$(mktemp -d)"
 
 # One corpus entry per line: the file, a tab, its flags.
 {
-    for f in "$ROOT"/tests/test_*.c "$ROOT"/tests/test_*.sic; do
+    for f in "$ROOT"/sic/tests/lexer/*.c "$ROOT"/sic/tests/lexer/*.sic "$ROOT"/tests/test_*.c "$ROOT"/tests/test_*.sic; do
         [ -e "$f" ] || continue
         flags=""; [ -f "$f.flags" ] && flags="$(cat "$f.flags")"
         printf '%s\t%s\n' "$f" "$flags"

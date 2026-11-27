@@ -1,0 +1,1314 @@
+// The lexer of the compiler written in SIC (sic/PLAN.md): preprocessed C or
+// SIC text to tokens, as siccomp's lexer (sic-frontend/src/lexer) makes them,
+// for sic/franken's lex stage. What differs on purpose is in sic/DIFFERENCES.md.
+module lexer;
+
+#include <string.h>
+
+// The token kinds, in the order of siccomp's `TokenKind` (franken's tests check
+// it against KindName).
+#define K_INT_LIT          0
+#define K_FLOAT_LIT        1
+#define K_STRING_LIT       2
+#define K_WIDE_STRING_LIT  3
+#define K_CHAR_LIT         4
+#define K_BOOL_LIT         5
+#define K_IDENT            6
+#define K_TYPE_NAME        7
+#define K_AUTO             8
+#define K_BREAK            9
+#define K_CASE             10
+#define K_CHAR             11
+#define K_CONST            12
+#define K_CONTINUE         13
+#define K_DEFAULT          14
+#define K_DO               15
+#define K_DOUBLE           16
+#define K_ELSE             17
+#define K_ENUM             18
+#define K_EXTERN           19
+#define K_FLOAT            20
+#define K_FOR              21
+#define K_GOTO             22
+#define K_IF               23
+#define K_INLINE           24
+#define K_NORETURN         25
+#define K_STATIC_ASSERT    26
+#define K_INT              27
+#define K_LONG             28
+#define K_REGISTER         29
+#define K_RESTRICT         30
+#define K_RETURN           31
+#define K_SHORT            32
+#define K_SIGNED           33
+#define K_SIZEOF           34
+#define K_STATIC           35
+#define K_STRUCT           36
+#define K_SWITCH           37
+#define K_TYPEDEF          38
+#define K_UNION            39
+#define K_UNSIGNED         40
+#define K_VOID             41
+#define K_VOLATILE         42
+#define K_WHILE            43
+#define K_BOOL             44
+#define K_COMPLEX          45
+#define K_ATOMIC           46
+#define K_FALLTHROUGH      47
+#define K_DEFER            48
+#define K_NEW              49
+#define K_DEL              50
+#define K_MODULE           51
+#define K_IMPORT           52
+#define K_MATCH            53
+#define K_TUPLE            54
+#define K_BITFIELD         55
+#define K_FAT_ARROW        56
+#define K_DOLLAR           57
+#define K_TYPEOF           58
+#define K_NULLPTR          59
+#define K_ALIGNAS          60
+#define K_GENERIC          61
+#define K_ATTRIBUTE        62
+#define K_EXTENSION        63
+#define K_ASM              64
+#define K_THREAD_LOCAL     65
+#define K_PLUS             66
+#define K_MINUS            67
+#define K_STAR             68
+#define K_SLASH            69
+#define K_PERCENT          70
+#define K_PLUS_PLUS        71
+#define K_MINUS_MINUS      72
+#define K_PLUS_ASSIGN      73
+#define K_MINUS_ASSIGN     74
+#define K_STAR_ASSIGN      75
+#define K_SLASH_ASSIGN     76
+#define K_PERCENT_ASSIGN   77
+#define K_AMP              78
+#define K_PIPE             79
+#define K_CARET            80
+#define K_TILDE            81
+#define K_BANG             82
+#define K_AMP_AMP          83
+#define K_PIPE_PIPE        84
+#define K_AND_ASSIGN       85
+#define K_OR_ASSIGN        86
+#define K_XOR_ASSIGN       87
+#define K_SHL              88
+#define K_SHR              89
+#define K_SHL_ASSIGN       90
+#define K_SHR_ASSIGN       91
+#define K_ROT_L            92
+#define K_ROT_R            93
+#define K_SWAP             94
+#define K_EQ               95
+#define K_EQ_EQ            96
+#define K_BANG_EQ          97
+#define K_LT               98
+#define K_GT               99
+#define K_LT_EQ            100
+#define K_GT_EQ            101
+#define K_QUESTION         102
+#define K_COLON            103
+#define K_SEMI             104
+#define K_COMMA            105
+#define K_DOT              106
+#define K_ARROW            107
+#define K_ELLIPSIS         108
+#define K_COLON_COLON      109
+#define K_AT               110
+#define K_L_PAREN          111
+#define K_R_PAREN          112
+#define K_L_BRACE          113
+#define K_R_BRACE          114
+#define K_L_BRACKET        115
+#define K_R_BRACKET        116
+#define K_EOF              117
+#define K_UNKNOWN          118
+
+// Their names, as `TokenKind` spells them.
+static string g_kind_names =
+    "IntLit FloatLit StringLit WideStringLit CharLit BoolLit Ident TypeName Auto "
+    "Break Case Char Const Continue Default Do Double Else Enum Extern Float For Goto "
+    "If Inline Noreturn StaticAssert Int Long Register Restrict Return Short Signed "
+    "Sizeof Static Struct Switch Typedef Union Unsigned Void Volatile While Bool "
+    "Complex Atomic Fallthrough Defer New Del Module Import Match Tuple Bitfield "
+    "FatArrow Dollar Typeof Nullptr Alignas Generic Attribute Extension Asm "
+    "ThreadLocal Plus Minus Star Slash Percent PlusPlus MinusMinus PlusAssign "
+    "MinusAssign StarAssign SlashAssign PercentAssign Amp Pipe Caret Tilde Bang "
+    "AmpAmp PipePipe AndAssign OrAssign XorAssign Shl Shr ShlAssign ShrAssign RotL "
+    "RotR Swap Eq EqEq BangEq Lt Gt LtEq GtEq Question Colon Semi Comma Dot Arrow "
+    "Ellipsis ColonColon At LParen RParen LBrace RBrace LBracket RBracket Eof Unknown";
+
+// ── The result, for Rust ─────────────────────────────────────────────────────
+
+// The tokens, Eof last. `data` holds TOKEN_WORDS words a token:
+//   kind and flags, byte start, byte end, char start, char end, line, col,
+//   file (an index into `files` + 1; 0 = none).
+// The first word is the kind (bits 0-7), the `#pragma pack` in force (8-15),
+// hidden (bit 16), and bit 17 when the token's text is in `text` (in token
+// order): then its third word is the text's length, not its byte end. Without
+// it, the text is the source's bytes start..end. `files` and `system`
+// (the files a line marker says are system headers) hold names, each ending in
+// '\n'. On an error, `error` says what and where; the tokens are incomplete.
+struct Tokens {
+    usize count;
+    u32 *data;
+    usize text_size;
+    u8 *text;
+    usize files_size;
+    u8 *files;
+    usize system_size;
+    u8 *system;
+    string error;
+    u32 error_line;
+    u32 error_col;
+    u32 error_file;
+}
+
+#define TOKEN_WORDS 8
+#define F_HIDDEN 65536
+#define F_TEXT 131072
+
+// A growing byte buffer.
+struct Bytes {
+    u8 *p;
+    usize n;
+    usize cap;
+}
+
+static void Reserve(Bytes *b, usize more)
+{
+    if (b->n + more <= b->cap) return;
+    usize cap = b->cap < 256 ? 256 : b->cap;
+    while (cap < b->n + more) cap *= 2;
+    u8 *p = new u8(cap);
+    if (b->n > 0) memcpy(p, b->p, b->n);
+    if (b->p != NULL) del b->p;
+    b->p = p;
+    b->cap = cap;
+}
+
+static void Put(Bytes *b, u8 c)
+{
+    if (b->n == b->cap) Reserve(b, 1);
+    b->p[b->n] = c;
+    b->n++;
+}
+
+static void PutBytes(Bytes *b, u8 *s, usize len)
+{
+    Reserve(b, len);
+    memcpy(b->p + b->n, s, len);
+    b->n += len;
+}
+
+static void PutUtf8(Bytes *b, u32 c)
+{
+    if (c < 0x80) {
+        Put(b, (u8)c);
+    } else if (c < 0x800) {
+        Put(b, (u8)(0xC0 | (c >> 6)));
+        Put(b, (u8)(0x80 | (c & 63)));
+    } else if (c < 0x10000) {
+        Put(b, (u8)(0xE0 | (c >> 12)));
+        Put(b, (u8)(0x80 | ((c >> 6) & 63)));
+        Put(b, (u8)(0x80 | (c & 63)));
+    } else {
+        Put(b, (u8)(0xF0 | (c >> 18)));
+        Put(b, (u8)(0x80 | ((c >> 12) & 63)));
+        Put(b, (u8)(0x80 | ((c >> 6) & 63)));
+        Put(b, (u8)(0x80 | (c & 63)));
+    }
+}
+
+static void PutDecimal(Bytes *b, u32 v)
+{
+    u8 digits[12];
+    i32 k = 0;
+    do {
+        digits[k] = (u8)('0' + v % 10);
+        k++;
+        v /= 10;
+    } while (v > 0);
+    while (k > 0) {
+        k--;
+        Put(b, digits[k]);
+    }
+}
+
+static void PutHex(Bytes *b, u32 v)
+{
+    u8 digits[8];
+    i32 k = 0;
+    do {
+        u32 d = v & 15;
+        digits[k] = (u8)(d < 10 ? '0' + d : 'a' + d - 10);
+        k++;
+        v >>= 4;
+    } while (v > 0);
+    while (k > 0) {
+        k--;
+        Put(b, digits[k]);
+    }
+}
+
+// ── Characters ──────────────────────────────────────────────────────────────
+
+static bool IsDigit(u8 c) { return c >= '0' && c <= '9'; }
+static bool IsAlpha(u8 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static bool IsAlnum(u8 c) { return IsAlpha(c) || IsDigit(c); }
+static bool IsHex(u8 c) { return IsDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static u32 HexValue(u8 c) { return IsDigit(c) ? c - '0' : (c | 32) - 'a' + 10; }
+
+// Rust's `char::is_ascii_whitespace`, what the lexer skips: no `\v`.
+static bool IsSkipSpace(u8 c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\x0C' || c == '\r';
+}
+
+// Unicode's White_Space, what `trim` takes off a directive's words.
+static bool IsUnicodeSpace(u32 c)
+{
+    if (c < 0x80) return c == ' ' || (c >= 9 && c <= 13);
+    return c == 0x85 || c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028
+        || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+// A code point a Rust `char` can hold.
+static bool IsChar(u32 c) { return c <= 0x10FFFF && (c < 0xD800 || c > 0xDFFF); }
+
+// The code points C11 allows in identifiers (Annex D.1); `start` leaves out
+// those that may not begin one (D.2, combining marks). ASCII is decided by the
+// caller.
+static bool IsIdentCodePoint(u32 c, bool start)
+{
+    if (start && ((c >= 0x0300 && c <= 0x036F) || (c >= 0x1DC0 && c <= 0x1DFF)
+        || (c >= 0x20D0 && c <= 0x20FF) || (c >= 0xFE20 && c <= 0xFE2F))) {
+        return false;
+    }
+    if (c >= 0x10000) return c <= 0xEFFFD && (c & 0xFFFF) <= 0xFFFD;
+    return c == 0xA8 || c == 0xAA || c == 0xAD || c == 0xAF || (c >= 0xB2 && c <= 0xB5)
+        || (c >= 0xB7 && c <= 0xBA) || (c >= 0xBC && c <= 0xBE) || (c >= 0xC0 && c <= 0xD6)
+        || (c >= 0xD8 && c <= 0xF6) || (c >= 0xF8 && c <= 0xFF) || (c >= 0x100 && c <= 0x167F)
+        || (c >= 0x1681 && c <= 0x180D) || (c >= 0x180F && c <= 0x1FFF)
+        || (c >= 0x200B && c <= 0x200D) || (c >= 0x202A && c <= 0x202E)
+        || (c >= 0x203F && c <= 0x2040) || c == 0x2054 || (c >= 0x2060 && c <= 0x206F)
+        || (c >= 0x2070 && c <= 0x218F) || (c >= 0x2460 && c <= 0x24FF)
+        || (c >= 0x2776 && c <= 0x2793) || (c >= 0x2C00 && c <= 0x2DFF)
+        || (c >= 0x2E80 && c <= 0x2FFF) || (c >= 0x3004 && c <= 0x3007)
+        || (c >= 0x3021 && c <= 0x302F) || (c >= 0x3031 && c <= 0x303F)
+        || (c >= 0x3040 && c <= 0xD7FF) || (c >= 0xF900 && c <= 0xFD3D)
+        || (c >= 0xFD40 && c <= 0xFDCF) || (c >= 0xFDF0 && c <= 0xFE44)
+        || (c >= 0xFE47 && c <= 0xFFFD);
+}
+
+// ── The lexer ───────────────────────────────────────────────────────────────
+
+#define LANG_C 0
+#define LANG_SIC 1
+
+struct Lexer {
+    string src;
+    u8 *s;          // the source's bytes (src's own; every read is below n)
+    usize n;
+    usize pos;      // byte index
+    u32 cpos;       // char index (Rust's token offsets)
+    u32 line;
+    u32 col;
+    u32 file;       // index into files + 1, 0: none
+    usize file_at;  // the current file's name in `files`
+    usize file_len;
+    i32 lang;
+    bool c23;
+    bool wchar16;   // `L"…"` is UTF-16 (-fshort-wchar)
+    u32 pack;
+    list<i32> pack_stack;
+    list<i32> visibility;
+    bool hidden;    // the top of `visibility` is hidden
+    u32 *data;
+    usize count;
+    usize cap;
+    Bytes text;
+    Bytes files;
+    Bytes system;
+    u32 nfiles;
+    bool failed;
+    string error;
+    u32 error_line;
+    u32 error_col;
+    u32 error_file;
+    // The token being scanned: where it starts, and whether its text is in `text`.
+    usize tok_text;
+    bool has_text;
+}
+
+static u8 At(Lexer *x, usize i) { return i < x->n ? x->s[i] : 0; }
+
+// The byte length of the UTF-8 sequence starting with `b`.
+static usize SeqLen(u8 b) { return b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4; }
+
+static u32 CodeAt(Lexer *x, usize i)
+{
+    u8 b = x->s[i];
+    if (b < 0x80) return b;
+    if (b < 0xE0) return ((u32)(b & 31) << 6) | (x->s[i + 1] & 63);
+    if (b < 0xF0)
+        return ((u32)(b & 15) << 12) | ((u32)(x->s[i + 1] & 63) << 6) | (x->s[i + 2] & 63);
+    return ((u32)(b & 7) << 18) | ((u32)(x->s[i + 1] & 63) << 12) | ((u32)(x->s[i + 2] & 63) << 6)
+        | (x->s[i + 3] & 63);
+}
+
+// One character on: its code point.
+static u32 Advance(Lexer *x)
+{
+    u8 b = x->s[x->pos];
+    u32 c = b;
+    if (b < 0x80) {
+        x->pos++;
+    } else {
+        c = CodeAt(x, x->pos);
+        x->pos += SeqLen(b);
+    }
+    x->cpos++;
+    if (b == '\n') {
+        x->line++;
+        x->col = 1;
+    } else {
+        x->col++;
+    }
+    return c;
+}
+
+// At least two characters left.
+static bool TwoLeft(Lexer *x) { return x->pos < x->n && x->pos + SeqLen(x->s[x->pos]) < x->n; }
+
+static bool Fail(Lexer *x, string msg, u32 line, u32 col, u32 file)
+{
+    x->failed = true;
+    x->error = msg;
+    x->error_line = line;
+    x->error_col = col;
+    x->error_file = file;
+    return false;
+}
+
+static void Emit(Lexer *x, u32 kind, usize bstart, u32 cstart, u32 line, u32 col, u32 file)
+{
+    if (x->count == x->cap) {
+        usize cap = x->cap < 1024 ? 1024 : x->cap * 2;
+        u32 *d = new u32(cap * TOKEN_WORDS);
+        if (x->count > 0) memcpy(d, x->data, x->count * TOKEN_WORDS * 4);
+        if (x->data != NULL) del x->data;
+        x->data = d;
+        x->cap = cap;
+    }
+    u32 *w = x->data + x->count * TOKEN_WORDS;
+    u32 head = kind | (x->pack << 8);
+    if (x->hidden) head |= F_HIDDEN;
+    if (x->has_text) head |= F_TEXT;
+    w[0] = head;
+    w[1] = (u32)bstart;
+    w[2] = x->has_text ? (u32)(x->text.n - x->tok_text) : (u32)x->pos;
+    w[3] = cstart;
+    w[4] = x->cpos;
+    w[5] = line;
+    w[6] = col;
+    w[7] = file;
+    x->count++;
+}
+
+// Eof: no offsets, pack or visibility, and the text "".
+static void EmitEof(Lexer *x)
+{
+    x->has_text = true;
+    x->tok_text = x->text.n;
+    Emit(x, K_EOF, 0, 0, x->line, x->col, x->file);
+    u32 *w = x->data + (x->count - 1) * TOKEN_WORDS;
+    w[0] = K_EOF | F_TEXT;
+    w[2] = 0;
+    w[4] = 0;
+}
+
+// The token's text goes to `text` from here.
+static void OwnText(Lexer *x)
+{
+    x->has_text = true;
+    x->tok_text = x->text.n;
+}
+
+static void SkipSpaceAndComments(Lexer *x)
+{
+    while (true) {
+        while (x->pos < x->n) {
+            u8 b = x->s[x->pos];
+            if (b == '\n') {
+                x->line++;
+                x->col = 0;
+            } else if (!IsSkipSpace(b)) {
+                break;
+            }
+            x->pos++;
+            x->cpos++;
+            x->col++;
+        }
+        if (x->pos + 1 < x->n && x->s[x->pos] == '/' && x->s[x->pos + 1] == '/') {
+            while (x->pos < x->n && x->s[x->pos] != '\n') Advance(x);
+            continue;
+        }
+        if (x->pos + 1 < x->n && x->s[x->pos] == '/' && x->s[x->pos + 1] == '*') {
+            Advance(x);
+            Advance(x);
+            while (TwoLeft(x) && !(x->s[x->pos] == '*' && x->s[x->pos + 1] == '/')) Advance(x);
+            if (TwoLeft(x)) {
+                Advance(x);
+                Advance(x);
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+// ── Line markers and pragmas ────────────────────────────────────────────────
+
+// The first index in [i, end) that is not Unicode white space.
+static usize TrimStart(Lexer *x, usize i, usize end)
+{
+    while (i < end) {
+        u32 c = CodeAt(x, i);
+        if (!IsUnicodeSpace(c)) break;
+        i += SeqLen(x->s[i]);
+    }
+    return i;
+}
+
+// The end of [i, end) without its trailing Unicode white space.
+static usize TrimEnd(Lexer *x, usize i, usize end)
+{
+    while (end > i) {
+        usize k = end - 1;
+        while (k > i && (x->s[k] & 0xC0) == 0x80) k--;
+        if (!IsUnicodeSpace(CodeAt(x, k))) break;
+        end = k;
+    }
+    return end;
+}
+
+static bool Is(Lexer *x, usize i, usize end, string word)
+{
+    return end - i == word.size && memcmp(x->s + i, word.ptr, word.size) == 0;
+}
+
+static bool HasPrefix(Lexer *x, usize i, usize end, string word)
+{
+    return end - i >= word.size && memcmp(x->s + i, word.ptr, word.size) == 0;
+}
+
+// A `#pragma pack` level: Rust's `u8` parse (an optional `+`, digits, at most
+// 255), a power of two; -1 when it is not one.
+static i32 PackNumber(Lexer *x, usize i, usize end)
+{
+    if (i < end && x->s[i] == '+') i++;
+    if (i == end) return -1;
+    u32 v = 0;
+    for (usize k = i; k < end; k++) {
+        if (!IsDigit(x->s[k])) return -1;
+        v = v * 10 + (x->s[k] - '0');
+        if (v > 255) return -1;
+    }
+    if (v == 0 || (v & (v - 1)) != 0) return -1;
+    return (i32)v;
+}
+
+// `#pragma pack(…)`: `()`, `(n)`, `(push[, id][, n])`, `(pop[, id])`, between
+// `a` and `end` (the `)`). An identifier names a pushed level; none of the code
+// sic takes uses that, and it is read like the plain form. Anything else (`show`)
+// changes nothing.
+static void PragmaPack(Lexer *x, usize a, usize end)
+{
+    bool first = true;
+    bool push = false;
+    usize i = a;
+    while (i <= end) {
+        usize j = i;
+        while (j < end && x->s[j] != ',') j++;
+        usize ws = TrimStart(x, i, j);
+        usize we = TrimEnd(x, ws, j);
+        i = j + 1;
+        if (ws == we) continue;
+        if (first) {
+            first = false;
+            if (Is(x, ws, we, "push")) {
+                x->pack_stack.add((i32)x->pack);
+                push = true;
+            } else if (Is(x, ws, we, "pop")) {
+                x->pack = 0;
+                if (x->pack_stack.size > 0) x->pack = (u32)x->pack_stack.pop();
+                return;
+            } else {
+                i32 n = PackNumber(x, ws, we);
+                if (n > 0) x->pack = (u32)n;
+                return;
+            }
+        } else if (push) {
+            i32 n = PackNumber(x, ws, we);
+            if (n > 0) {
+                x->pack = (u32)n;
+                return;
+            }
+        }
+    }
+    if (first) x->pack = 0;
+}
+
+static void Pragma(Lexer *x, usize at, usize end)
+{
+    usize r = TrimStart(x, at, end);
+    if (HasPrefix(x, r, end, "pack")) {
+        usize a = TrimStart(x, r + 4, end);
+        if (a < end && x->s[a] == '(') {
+            usize close = a + 1;
+            while (close < end && x->s[close] != ')') close++;
+            PragmaPack(x, a + 1, close);
+        }
+    }
+    if (HasPrefix(x, r, end, "GCC")) {
+        usize v = TrimStart(x, r + 3, end);
+        if (HasPrefix(x, v, end, "visibility")) {
+            v = TrimStart(x, v + 10, end);
+            if (HasPrefix(x, v, end, "pop")) {
+                if (x->visibility.size > 0) x->visibility.pop();
+            } else if (HasPrefix(x, v, end, "push")) {
+                usize k = TrimStart(x, v + 4, end);
+                if (k < end && x->s[k] == '(') {
+                    usize close = k + 1;
+                    while (close < end && x->s[close] != ')') close++;
+                    usize ws = TrimStart(x, k + 1, close);
+                    usize we = TrimEnd(x, ws, close);
+                    bool hidden = Is(x, ws, we, "hidden") || Is(x, ws, we, "internal");
+                    x->visibility.add(hidden ? 1 : 0);
+                }
+            }
+            usize depth = x->visibility.size;
+            x->hidden = depth > 0 && x->visibility[depth - 1] != 0;
+        }
+    }
+}
+
+// Whether [i, end) has the white-space separated word `3`.
+static bool HasFlag3(Lexer *x, usize i, usize end)
+{
+    while (true) {
+        i = TrimStart(x, i, end);
+        if (i >= end) return false;
+        usize j = i;
+        while (j < end && !IsUnicodeSpace(CodeAt(x, j))) j += SeqLen(x->s[j]);
+        if (j - i == 1 && x->s[i] == '3') return true;
+        i = j;
+    }
+}
+
+// A line marker, `# 42 "foo.c" 1`: the line after it is line 42 of foo.c. Or a
+// directive the preprocessor left: `#pragma pack` and `#pragma GCC visibility`
+// are read (they lay out and mark what follows); the rest is skipped.
+static void LineMarker(Lexer *x)
+{
+    usize eol = x->pos;
+    while (eol < x->n && x->s[eol] != '\n') eol++;
+    usize d = TrimStart(x, x->pos + 1, eol);
+    if (HasPrefix(x, d, eol, "pragma")) Pragma(x, d + 6, eol);
+
+    Advance(x);
+    while (x->pos < x->n && x->s[x->pos] == ' ') Advance(x);
+    u32 target = x->line;
+    if (x->pos < x->n && IsDigit(x->s[x->pos])) {
+        u64 v = 0;
+        bool ok = true;
+        while (x->pos < x->n && IsDigit(x->s[x->pos])) {
+            u32 c = Advance(x);
+            v = v * 10 + (c - '0');
+            if (v > 0xFFFFFFFF) {
+                ok = false;
+                v = 0;
+            }
+        }
+        if (ok) target = (u32)v;
+    }
+    while (x->pos < x->n && x->s[x->pos] == ' ') Advance(x);
+    if (x->pos < x->n && x->s[x->pos] == '"') {
+        Advance(x);
+        usize ns = x->pos;
+        while (x->pos < x->n && x->s[x->pos] != '"' && x->s[x->pos] != '\n') Advance(x);
+        usize ne = x->pos;
+        if (x->pos < x->n && x->s[x->pos] == '"') Advance(x);
+        usize len = ne - ns;
+        if (HasFlag3(x, x->pos, eol)) {
+            PutBytes(&x->system, x->s + ns, len);
+            Put(&x->system, '\n');
+        }
+        bool same = x->file != 0 && x->file_len == len
+            && memcmp(x->files.p + x->file_at, x->s + ns, len) == 0;
+        if (!same) {
+            x->file_at = x->files.n;
+            x->file_len = len;
+            PutBytes(&x->files, x->s + ns, len);
+            Put(&x->files, '\n');
+            x->nfiles++;
+            x->file = x->nfiles;
+        }
+    }
+    while (x->pos < x->n && x->s[x->pos] != '\n') Advance(x);
+    if (x->pos < x->n) Advance(x);
+    x->line = target;
+    x->col = 1;
+}
+
+// ── Keywords ────────────────────────────────────────────────────────────────
+
+// Kind + 1 of a keyword (0: none).
+static dict<string, i32> g_sic_words;
+static dict<string, i32> g_c_words;
+static bool g_words = false;
+
+static void Word(dict<string, i32> *d, string w, i32 kind) { (*d)[w] = kind + 1; }
+
+// Each space-separated word of `words`.
+static void Words(dict<string, i32> *d, string words, i32 kind)
+{
+    usize i = 0;
+    while (i < words.size) {
+        usize e = i;
+        while (e < words.size && words[e] != ' ') e++;
+        Word(d, words[i:e], kind);
+        i = e + 1;
+    }
+}
+
+static void InitWords()
+{
+    if (g_words) return;
+    g_words = true;
+    dict<string, i32> *s = &g_sic_words;
+    Words(s,
+        "i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 f128 f80 isize usize string "
+        "bigint fixed any dict va_dict Task Fn weak set list u8char va_array", K_TYPE_NAME);
+    Word(s, "fallthrough", K_FALLTHROUGH);
+    Word(s, "defer", K_DEFER);
+    Word(s, "new", K_NEW);
+    Word(s, "del", K_DEL);
+    Word(s, "module", K_MODULE);
+    Word(s, "import", K_IMPORT);
+    Word(s, "match", K_MATCH);
+    Word(s, "tuple", K_TUPLE);
+    Word(s, "atomic", K_ATOMIC);
+    Word(s, "bitfield", K_BITFIELD);
+
+    dict<string, i32> *c = &g_c_words;
+    Word(c, "auto", K_AUTO);
+    Word(c, "__auto_type", K_AUTO);
+    Word(c, "break", K_BREAK);
+    Word(c, "case", K_CASE);
+    Word(c, "char", K_CHAR);
+    Word(c, "const", K_CONST);
+    Word(c, "continue", K_CONTINUE);
+    Word(c, "default", K_DEFAULT);
+    Word(c, "do", K_DO);
+    Word(c, "double", K_DOUBLE);
+    Word(c, "else", K_ELSE);
+    Word(c, "enum", K_ENUM);
+    Word(c, "extern", K_EXTERN);
+    Word(c, "float", K_FLOAT);
+    Word(c, "for", K_FOR);
+    Word(c, "goto", K_GOTO);
+    Word(c, "if", K_IF);
+    Word(c, "inline", K_INLINE);
+    Word(c, "_Noreturn", K_NORETURN);
+    Word(c, "_Static_assert", K_STATIC_ASSERT);
+    Word(c, "static_assert", K_STATIC_ASSERT);
+    Word(c, "int", K_INT);
+    Word(c, "long", K_LONG);
+    Word(c, "register", K_REGISTER);
+    Word(c, "restrict", K_RESTRICT);
+    Word(c, "return", K_RETURN);
+    Word(c, "short", K_SHORT);
+    Word(c, "signed", K_SIGNED);
+    Word(c, "sizeof", K_SIZEOF);
+    Word(c, "static", K_STATIC);
+    Word(c, "struct", K_STRUCT);
+    Word(c, "switch", K_SWITCH);
+    Word(c, "typedef", K_TYPEDEF);
+    Word(c, "union", K_UNION);
+    Word(c, "unsigned", K_UNSIGNED);
+    Word(c, "void", K_VOID);
+    Word(c, "volatile", K_VOLATILE);
+    Word(c, "while", K_WHILE);
+    Word(c, "_Bool", K_BOOL);
+    Word(c, "bool", K_BOOL);
+    Word(c, "typeof", K_TYPEOF);
+    Word(c, "__typeof__", K_TYPEOF);
+    Word(c, "__typeof", K_TYPEOF);
+    Word(c, "nullptr", K_NULLPTR);
+    Word(c, "_Alignas", K_ALIGNAS);
+    Word(c, "alignas", K_ALIGNAS);
+    Word(c, "_Generic", K_GENERIC);
+    Word(c, "_Complex", K_COMPLEX);
+    Word(c, "_Atomic", K_ATOMIC);
+    // Extended floating types (GCC `__float128`/`__float80`, C23 `_FloatN`), and
+    // GCC's 128-bit integers, are type names.
+    Words(c,
+        "__builtin_va_list __builtin_ms_va_list __float128 _Float128 _Float128x "
+        "__float80 __ibm128 _Float16 _Float32 _Float32x _Float64 _Float64x __bf16 "
+        "__fp16 __int128 __int128_t __uint128_t", K_TYPE_NAME);
+    Word(c, "__attribute__", K_ATTRIBUTE);
+    Word(c, "__attribute", K_ATTRIBUTE);
+    Word(c, "__extension__", K_EXTENSION);
+    // GNU/Clang spellings (`__kw` and `__kw__`), which glibc's headers use.
+    Word(c, "__asm__", K_ASM);
+    Word(c, "__asm", K_ASM);
+    Word(c, "asm", K_ASM);
+    Word(c, "__inline__", K_INLINE);
+    Word(c, "__inline", K_INLINE);
+    Word(c, "__const__", K_CONST);
+    Word(c, "__const", K_CONST);
+    Word(c, "__volatile__", K_VOLATILE);
+    Word(c, "__volatile", K_VOLATILE);
+    Word(c, "__restrict__", K_RESTRICT);
+    Word(c, "__restrict", K_RESTRICT);
+    Word(c, "__signed__", K_SIGNED);
+    Word(c, "__signed", K_SIGNED);
+    Word(c, "__thread", K_THREAD_LOCAL);
+    Word(c, "_Thread_local", K_THREAD_LOCAL);
+    Word(c, "thread_local", K_THREAD_LOCAL);
+}
+
+// What follows `pos` past spaces and tabs.
+static u8 NextNonBlank(Lexer *x)
+{
+    usize i = x->pos;
+    while (i < x->n && (x->s[i] == ' ' || x->s[i] == '\t')) i++;
+    return At(x, i);
+}
+
+static u32 IdentOrKeyword(Lexer *x, usize start)
+{
+    while (x->pos < x->n) {
+        // A run of ASCII on at once; a character past it one at a time.
+        usize i = x->pos;
+        while (i < x->n && (IsAlnum(x->s[i]) || x->s[i] == '_')) i++;
+        u32 k = (u32)(i - x->pos);
+        x->pos = i;
+        x->cpos += k;
+        x->col += k;
+        if (i >= x->n || x->s[i] < 0x80 || !IsIdentCodePoint(CodeAt(x, i), false)) break;
+        Advance(x);
+    }
+    string w = x->src[start:x->pos];
+    usize len = x->pos - start;
+    u8 w0 = x->s[start];
+    bool sic = x->lang == LANG_SIC;
+    // Before C23 these are ordinary identifiers in C (`<stdbool.h>` makes macros
+    // of some; Linux has its own `true`/`false` enumerators).
+    if (!sic && !x->c23 && len >= 4 && len <= 13
+        && (w == "bool" || w == "true" || w == "false" || w == "nullptr" || w == "alignas"
+            || w == "thread_local" || w == "static_assert")) {
+        return K_IDENT;
+    }
+    // `true`/`false`: `bool` in SIC, the integers 1 and 0 in C.
+    if ((len == 4 && w0 == 't' && w == "true") || (len == 5 && w0 == 'f' && w == "false")) {
+        OwnText(x);
+        Put(&x->text, len == 4 ? '1' : '0');
+        return sic ? K_BOOL_LIT : K_INT_LIT;
+    }
+    // Every keyword is 2 to 20 bytes and starts with a lowercase letter, `_`,
+    // or (SIC's `Task` and `Fn`) `T` or `F`.
+    if (len < 2 || len > 20 || !((w0 >= 'a' && w0 <= 'z') || w0 == '_' || w0 == 'T' || w0 == 'F'))
+        return K_IDENT;
+    i32 k = 0;
+    if (sic) k = g_sic_words[w];
+    if (k == 0) k = g_c_words[w];
+    if (k == 0) return K_IDENT;
+    u32 kind = (u32)(k - 1);
+    if (kind == K_TYPE_NAME) {
+        // `list`/`set` are types only where a type goes: before `<`, `*` or a
+        // name; `Fn`/`weak` only before `<`. Elsewhere they are names.
+        if (w == "list" || w == "set") {
+            u8 c = NextNonBlank(x);
+            if (!(c == '<' || c == '*' || IsAlpha(c) || c == '_')) return K_IDENT;
+        } else if (w == "Fn" || w == "weak") {
+            if (NextNonBlank(x) != '<') return K_IDENT;
+        }
+    }
+    return kind;
+}
+
+// ── Numbers ─────────────────────────────────────────────────────────────────
+
+static u32 Number(Lexer *x)
+{
+    bool is_float = false;
+    u8 c = At(x, x->pos);
+    u8 c2 = At(x, x->pos + 1);
+    if (c == '0' && (c2 == 'x' || c2 == 'X')) {
+        Advance(x);
+        Advance(x);
+        while (x->pos < x->n && IsHex(x->s[x->pos])) Advance(x);
+        // A hex float: `.hexdigits` and a binary exponent (`0x1p64`, `0x1.8p-3`).
+        if (At(x, x->pos) == '.' && x->pos < x->n) {
+            is_float = true;
+            Advance(x);
+            while (x->pos < x->n && IsHex(x->s[x->pos])) Advance(x);
+        }
+        if (x->pos < x->n && (x->s[x->pos] == 'p' || x->s[x->pos] == 'P')) {
+            is_float = true;
+            Advance(x);
+            if (x->pos < x->n && (x->s[x->pos] == '+' || x->s[x->pos] == '-')) Advance(x);
+            while (x->pos < x->n && IsDigit(x->s[x->pos])) Advance(x);
+        }
+    } else if (c == '0' && (c2 == 'b' || c2 == 'B')) {
+        Advance(x);
+        Advance(x);
+        while (x->pos < x->n && (x->s[x->pos] == '0' || x->s[x->pos] == '1')) Advance(x);
+    } else {
+        while (x->pos < x->n && IsDigit(x->s[x->pos])) Advance(x);
+        if (x->pos < x->n && x->s[x->pos] == '.') {
+            is_float = true;
+            Advance(x);
+            while (x->pos < x->n && IsDigit(x->s[x->pos])) Advance(x);
+        }
+        if (x->pos < x->n && (x->s[x->pos] == 'e' || x->s[x->pos] == 'E')) {
+            is_float = true;
+            Advance(x);
+            if (x->pos < x->n && (x->s[x->pos] == '+' || x->s[x->pos] == '-')) Advance(x);
+            while (x->pos < x->n && IsDigit(x->s[x->pos])) Advance(x);
+        }
+    }
+    // Suffixes: u, l, f and their mixes; `f`/`F` may carry a C23 `_FloatN` width
+    // (`1.0f128`); one GNU imaginary `i`/`j` (`1.0fi`, `2i`) unless a name goes on.
+    bool imaginary = false;
+    while (x->pos < x->n) {
+        u8 s = x->s[x->pos];
+        bool suffix = s == 'u' || s == 'U' || s == 'l' || s == 'L' || s == 'f' || s == 'F';
+        bool imag = s == 'i' || s == 'j' || s == 'I' || s == 'J';
+        if (!suffix) {
+            if (imaginary || !imag) break;
+            u8 nx = At(x, x->pos + 1);
+            bool more = IsAlnum(nx)
+                && !(nx == 'f' || nx == 'F' || nx == 'l' || nx == 'L' || nx == 'u' || nx == 'U');
+            if (more) break;
+            imaginary = true;
+        }
+        Advance(x);
+        if (s == 'f' || s == 'F') {
+            is_float = true;
+            while (x->pos < x->n && IsDigit(x->s[x->pos])) Advance(x);
+        }
+    }
+    return is_float ? K_FLOAT_LIT : K_INT_LIT;
+}
+
+// ── Strings and characters ──────────────────────────────────────────────────
+
+// An escape's value, the `\` read: one character, octal (1-3 digits), `\u`/`\U`
+// (4/8 hex digits) or `\x` (any number of hex digits, wrapping).
+static u32 Escape(Lexer *x)
+{
+    u32 c = Advance(x);
+    if (c >= '0' && c <= '7') {
+        u32 v = c - '0';
+        i32 count = 1;
+        while (count < 3 && x->pos < x->n && x->s[x->pos] >= '0' && x->s[x->pos] <= '7') {
+            v = v * 8 + (x->s[x->pos] - '0');
+            Advance(x);
+            count++;
+        }
+        return v;
+    }
+    if (c == 'u' || c == 'U') {
+        u32 v = 0;
+        i32 digits = c == 'u' ? 4 : 8;
+        for (i32 k = 0; k < digits && x->pos < x->n && IsHex(x->s[x->pos]); k++) {
+            v = v * 16 + HexValue(x->s[x->pos]);
+            Advance(x);
+        }
+        return v;
+    }
+    if (c == 'x' || c == 'X') {
+        u32 v = 0;
+        while (x->pos < x->n && IsHex(x->s[x->pos])) {
+            v = v * 16 + HexValue(x->s[x->pos]);
+            Advance(x);
+        }
+        return v;
+    }
+    switch (c) {
+        case 'n': return '\n';
+        case 't': return '\t';
+        case 'r': return '\r';
+        case 'a': return 7;
+        case 'b': return 8;
+        case 'f': return 12;
+        case 'v': return 11;
+        default: return c;
+    }
+}
+
+// A narrow literal's escape: one byte, or a named character (`\u`, `\U`) in
+// UTF-8, as GCC writes it.
+static void PutEscape(Lexer *x, u32 v, bool named)
+{
+    if (named && IsChar(v)) PutUtf8(&x->text, v);
+    else Put(&x->text, (u8)v);
+}
+
+// A string literal: its bytes (escapes decoded; not necessarily UTF-8).
+static bool StringLit(Lexer *x, u32 line, u32 col, u32 file)
+{
+    Advance(x);
+    OwnText(x);
+    while (true) {
+        if (x->pos >= x->n) return Fail(x, "unterminated string literal", line, col, file);
+        usize at = x->pos;
+        u32 c = Advance(x);
+        if (c == '"') break;
+        if (c == '\\') {
+            if (x->pos >= x->n) return Fail(x, "unterminated escape", line, col, file);
+            bool named = x->s[x->pos] == 'u' || x->s[x->pos] == 'U';
+            PutEscape(x, Escape(x), named);
+        } else {
+            PutBytes(&x->text, x->s + at, x->pos - at);
+        }
+    }
+    return true;
+}
+
+static void PutUnit(Lexer *x, bool *first, u32 u)
+{
+    if (!*first) Put(&x->text, ',');
+    *first = false;
+    PutHex(&x->text, u);
+}
+
+static void PutUtf16(Lexer *x, bool *first, u32 c)
+{
+    if (c < 0x10000) {
+        PutUnit(x, first, c);
+    } else {
+        PutUnit(x, first, 0xD800 + ((c - 0x10000) >> 10));
+        PutUnit(x, first, 0xDC00 + ((c - 0x10000) & 0x3FF));
+    }
+}
+
+// `L"…"` (wchar_t), `u"…"` (char16_t, UTF-16) or `U"…"` (char32_t): the prefix
+// and the code units in hex, comma-separated (`L68,65`).
+static bool WideStringLit(Lexer *x, u8 prefix, u32 line, u32 col, u32 file)
+{
+    Advance(x);
+    OwnText(x);
+    Put(&x->text, prefix);
+    bool utf16 = prefix == 'u' || (prefix == 'L' && x->wchar16);
+    bool first = true;
+    while (true) {
+        if (x->pos >= x->n) return Fail(x, "unterminated string literal", line, col, file);
+        u32 c = Advance(x);
+        if (c == '"') break;
+        if (c == '\\') {
+            if (x->pos >= x->n) return Fail(x, "unterminated escape", line, col, file);
+            // `\u`/`\U` name a character (a surrogate pair in UTF-16); `\x` and
+            // octal escapes are one unit.
+            bool named = x->s[x->pos] == 'u' || x->s[x->pos] == 'U';
+            u32 v = Escape(x);
+            if (named && utf16 && IsChar(v)) PutUtf16(x, &first, v);
+            else PutUnit(x, &first, utf16 ? v & 0xFFFF : v);
+        } else if (utf16) {
+            PutUtf16(x, &first, c);
+        } else {
+            PutUnit(x, &first, c);
+        }
+    }
+    return true;
+}
+
+// A SIC `"""…"""`, the `r` of a raw one read. A raw string keeps its bytes; any
+// other decodes escapes, and a newline with the indentation after it is one
+// space.
+static bool TripleString(Lexer *x, bool raw, u32 line, u32 col, u32 file)
+{
+    Advance(x);
+    Advance(x);
+    Advance(x);
+    OwnText(x);
+    bool pending_newline = false;
+    while (true) {
+        if (x->pos >= x->n) return Fail(x, "unterminated multiline string", line, col, file);
+        if (x->s[x->pos] == '"' && At(x, x->pos + 1) == '"' && At(x, x->pos + 2) == '"') {
+            Advance(x);
+            Advance(x);
+            Advance(x);
+            break;
+        }
+        usize at = x->pos;
+        u32 c = Advance(x);
+        if (raw) {
+            PutBytes(&x->text, x->s + at, x->pos - at);
+            continue;
+        }
+        if (c == '\n') {
+            pending_newline = true;
+            continue;
+        }
+        if (pending_newline) {
+            if (c == ' ' || c == '\t' || c == '\r') continue;
+            if (x->text.n > x->tok_text) Put(&x->text, ' ');
+            pending_newline = false;
+        }
+        if (c == '\\') {
+            if (x->pos >= x->n) return Fail(x, "unterminated escape", line, col, file);
+            bool named = x->s[x->pos] == 'u' || x->s[x->pos] == 'U';
+            PutEscape(x, Escape(x), named);
+        } else {
+            PutBytes(&x->text, x->s + at, x->pos - at);
+        }
+    }
+    return true;
+}
+
+// A character constant: its value in decimal, after the prefix of a prefixed
+// one (`L'x'`, `u'x'`, `U'x'`: `u120`) for the parser to type it.
+static bool CharLit(Lexer *x, u8 prefix, u32 line, u32 col, u32 file)
+{
+    Advance(x);
+    if (x->pos >= x->n) return Fail(x, "unterminated char literal", line, col, file);
+    u32 c = Advance(x);
+    u32 v = c;
+    if (c == '\\') {
+        if (x->pos >= x->n) return Fail(x, "unterminated escape", line, col, file);
+        v = Escape(x);
+    }
+    if (x->pos < x->n && x->s[x->pos] == '\'') Advance(x);
+    OwnText(x);
+    if (prefix != 0) Put(&x->text, prefix);
+    PutDecimal(&x->text, v);
+    return true;
+}
+
+// ── Operators ───────────────────────────────────────────────────────────────
+
+static u32 Punct(Lexer *x)
+{
+    u32 c = Advance(x);
+    u8 p2 = At(x, x->pos);
+    u8 p3 = At(x, x->pos + 1);
+    bool sic = x->lang == LANG_SIC;
+    if (c >= 0x80) {
+        OwnText(x);
+        return K_UNKNOWN;
+    }
+    switch (c) {
+        case '<':
+            if (sic && p2 == '<' && p3 == '<') { Advance(x); Advance(x); return K_ROT_L; }
+            if (sic && p2 == '>') { Advance(x); return K_SWAP; }
+            if (p2 == '<' && p3 == '=') { Advance(x); Advance(x); return K_SHL_ASSIGN; }
+            if (p2 == '<') { Advance(x); return K_SHL; }
+            if (p2 == '=') { Advance(x); return K_LT_EQ; }
+            return K_LT;
+        case '>':
+            if (sic && p2 == '>' && p3 == '>') { Advance(x); Advance(x); return K_ROT_R; }
+            if (p2 == '>' && p3 == '=') { Advance(x); Advance(x); return K_SHR_ASSIGN; }
+            if (p2 == '>') { Advance(x); return K_SHR; }
+            if (p2 == '=') { Advance(x); return K_GT_EQ; }
+            return K_GT;
+        case '+':
+            if (p2 == '+') { Advance(x); return K_PLUS_PLUS; }
+            if (p2 == '=') { Advance(x); return K_PLUS_ASSIGN; }
+            return K_PLUS;
+        case '-':
+            if (p2 == '-') { Advance(x); return K_MINUS_MINUS; }
+            if (p2 == '=') { Advance(x); return K_MINUS_ASSIGN; }
+            if (p2 == '>') { Advance(x); return K_ARROW; }
+            return K_MINUS;
+        case '*':
+            if (p2 == '=') { Advance(x); return K_STAR_ASSIGN; }
+            return K_STAR;
+        case '/':
+            if (p2 == '=') { Advance(x); return K_SLASH_ASSIGN; }
+            return K_SLASH;
+        case '%':
+            if (p2 == '=') { Advance(x); return K_PERCENT_ASSIGN; }
+            return K_PERCENT;
+        case '&':
+            if (p2 == '=') { Advance(x); return K_AND_ASSIGN; }
+            if (p2 == '&') { Advance(x); return K_AMP_AMP; }
+            return K_AMP;
+        case '|':
+            if (p2 == '=') { Advance(x); return K_OR_ASSIGN; }
+            if (p2 == '|') { Advance(x); return K_PIPE_PIPE; }
+            return K_PIPE;
+        case '^':
+            if (p2 == '=') { Advance(x); return K_XOR_ASSIGN; }
+            return K_CARET;
+        case '=':
+            if (p2 == '=') { Advance(x); return K_EQ_EQ; }
+            // SIC's lambda expression-body arrow `[](x) => expr`.
+            if (p2 == '>') { Advance(x); return K_FAT_ARROW; }
+            return K_EQ;
+        case '!':
+            if (p2 == '=') { Advance(x); return K_BANG_EQ; }
+            return K_BANG;
+        case '.':
+            if (p2 == '.' && p3 == '.') { Advance(x); Advance(x); return K_ELLIPSIS; }
+            return K_DOT;
+        case ':':
+            if (sic && p2 == ':') { Advance(x); return K_COLON_COLON; }
+            return K_COLON;
+        case '~': return K_TILDE;
+        case '?': return K_QUESTION;
+        case '@': return K_AT;
+        case '$':
+            if (sic) return K_DOLLAR;
+            break;
+        case ';': return K_SEMI;
+        case ',': return K_COMMA;
+        case '(': return K_L_PAREN;
+        case ')': return K_R_PAREN;
+        case '{': return K_L_BRACE;
+        case '}': return K_R_BRACE;
+        case '[': return K_L_BRACKET;
+        case ']': return K_R_BRACKET;
+    }
+    OwnText(x);
+    return K_UNKNOWN;
+}
+
+// ── The token loop ──────────────────────────────────────────────────────────
+
+static bool NextToken(Lexer *x)
+{
+    usize bstart = x->pos;
+    u32 cstart = x->cpos;
+    u32 line = x->line;
+    u32 col = x->col;
+    u32 file = x->file;
+    x->has_text = false;
+    u8 c = x->s[x->pos];
+    u8 n1 = At(x, x->pos + 1);
+    bool sic = x->lang == LANG_SIC;
+    u32 kind = K_UNKNOWN;
+    bool ok = true;
+
+    if ((c == 'L' || c == 'u' || c == 'U') && n1 == '"') {
+        Advance(x);
+        ok = WideStringLit(x, c, line, col, file);
+        kind = K_WIDE_STRING_LIT;
+    } else if ((c == 'L' || c == 'u' || c == 'U') && n1 == '\'') {
+        Advance(x);
+        ok = CharLit(x, c, line, col, file);
+        kind = K_CHAR_LIT;
+    } else if (c == 'u' && n1 == '8' && At(x, x->pos + 2) == '"') {
+        Advance(x);
+        Advance(x);
+        ok = StringLit(x, line, col, file);
+        kind = K_STRING_LIT;
+    } else if (sic && c == 'r' && n1 == '"' && At(x, x->pos + 2) == '"'
+        && At(x, x->pos + 3) == '"') {
+        Advance(x);
+        ok = TripleString(x, true, line, col, file);
+        kind = K_STRING_LIT;
+    } else if (c < 0x80 ? IsAlpha(c) || c == '_' : IsIdentCodePoint(CodeAt(x, x->pos), true)) {
+        kind = IdentOrKeyword(x, bstart);
+    } else if (IsDigit(c) || (c == '.' && IsDigit(n1))) {
+        kind = Number(x);
+    } else if (sic && c == '"' && n1 == '"' && At(x, x->pos + 2) == '"') {
+        ok = TripleString(x, false, line, col, file);
+        kind = K_STRING_LIT;
+    } else if (c == '"') {
+        ok = StringLit(x, line, col, file);
+        kind = K_STRING_LIT;
+    } else if (c == '\'') {
+        ok = CharLit(x, 0, line, col, file);
+        kind = K_CHAR_LIT;
+    } else {
+        kind = Punct(x);
+    }
+    if (!ok) return false;
+    Emit(x, kind, bstart, cstart, line, col, file);
+    return true;
+}
+
+// The tokens of `src`, a whole preprocessed unit: `lang` is LANG_C or LANG_SIC,
+// `c23` makes C23's keywords keywords in C, `wchar16` makes `L"…"` UTF-16.
+Tokens Lex(string src, i32 lang, bool c23, bool wchar16)
+{
+    InitWords();
+    Lexer x;
+    x.src = src;
+    x.n = src.size;
+    x.s = (u8 *)src.data;
+    // Room for a token every 3 bytes (C runs about one every 4): it rarely grows.
+    x.cap = x.n / 3 + 16;
+    x.data = new u32(x.cap * TOKEN_WORDS);
+    x.line = 1;
+    x.col = 1;
+    x.lang = lang;
+    x.c23 = c23;
+    x.wchar16 = wchar16;
+    while (true) {
+        SkipSpaceAndComments(&x);
+        if (x.pos >= x.n) {
+            // Eof: no offsets, pack or visibility; its text is "".
+            x.has_text = true;
+            x.tok_text = x.text.n;
+            EmitEof(&x);
+            break;
+        }
+        if (x.s[x.pos] == '#') {
+            LineMarker(&x);
+            continue;
+        }
+        if (!NextToken(&x)) break;
+    }
+    Tokens t;
+    t.count = x.count;
+    t.data = x.data;
+    t.text_size = x.text.n;
+    t.text = x.text.p;
+    t.files_size = x.files.n;
+    t.files = x.files.p;
+    t.system_size = x.system.n;
+    t.system = x.system.p;
+    t.error = x.error;
+    t.error_line = x.error_line;
+    t.error_col = x.error_col;
+    t.error_file = x.error_file;
+    return t;
+}
+
+// Frees what Lex allocated.
+void Free(Tokens *t)
+{
+    if (t->data != NULL) del t->data;
+    if (t->text != NULL) del t->text;
+    if (t->files != NULL) del t->files;
+    if (t->system != NULL) del t->system;
+    t->data = NULL;
+    t->text = NULL;
+    t->files = NULL;
+    t->system = NULL;
+    t->count = 0;
+}
+
+// The name of token kind `kind` ("" past the last).
+string KindName(i32 kind)
+{
+    string all = g_kind_names;
+    usize i = 0;
+    for (i32 k = 0; k < kind; k++) {
+        while (i < all.size && all[i] != ' ') i++;
+        if (i == all.size) return "";
+        i++;
+    }
+    usize e = i;
+    while (e < all.size && all[e] != ' ') e++;
+    return all[i:e];
+}

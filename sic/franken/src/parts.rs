@@ -15,7 +15,7 @@ pub struct Part {
 /// When a part comes, its `built` is `cfg!(sic_<name>)` (build.rs's PARTS lists
 /// it) and `stages` puts its function in.
 pub const PARTS: &[Part] = &[
-    Part { name: "lexer", letter: 'l', built: false, default: false },
+    Part { name: "lexer", letter: 'l', built: cfg!(sic_lexer), default: false },
     Part { name: "parser", letter: 'p', built: false, default: false },
     Part { name: "lower", letter: 'i', built: false, default: false },
     Part { name: "opt", letter: 'o', built: false, default: false },
@@ -75,6 +75,8 @@ pub fn print(active: &[&str]) {
 /// The back end's letter comes from the back end in use (`Backend::sic`).
 pub fn stages(active: &[&str]) -> sic::Stages {
     let mut stages = sic::Stages::RUST;
+    #[cfg(sic_lexer)]
+    if active.contains(&"lexer") { stages.lex = crate::lexer::lex; }
     let letters: String = PARTS.iter()
         .filter(|p| p.letter != 'b' && active.contains(&p.name)).map(|p| p.letter).collect();
     stages.sic = Box::leak(letters.into_boxed_str());

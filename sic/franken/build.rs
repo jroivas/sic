@@ -7,7 +7,7 @@
 use std::path::Path;
 
 /// The parts there are, as sic/<name>/ folders; parts.rs lists the stages they give.
-const PARTS: &[&str] = &[];
+const PARTS: &[&str] = &["lexer"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

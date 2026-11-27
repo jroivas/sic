@@ -1,0 +1,1 @@
+int a; // comment at the end without a newline

@@ -2,6 +2,8 @@
 //! stages `SIC_PARTS` names running in SIC. `-print-parts` lists the stages.
 //! See sic/PLAN.md.
 
+#[cfg(sic_lexer)]
+mod lexer;
 mod parts;
 
 fn main() {

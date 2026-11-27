@@ -37,6 +37,7 @@ echo "franken: $SIC"
 echo "parts:   $("$SIC" -print-parts | awk 'NR > 1 && $4 == "yes" { printf "%s%s", s, $1; s = "," }')"
 [ -n "${SIC_PARTS:-}" ] && echo "SIC_PARTS=$SIC_PARTS"
 
+step "franken tests" sic/build.sh release --test
 if "$SIC" -print-parts | awk '$1 == "lexer" && $2 == "yes" { f = 1 } END { exit !f }'; then
     step "lexer comparison" env FRANKEN="$SIC" sic/tests/diff-lexer.sh
 fi

@@ -1,0 +1,1 @@
+const int *w = (const int *)L"unterminated

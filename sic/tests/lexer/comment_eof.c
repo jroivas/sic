@@ -1,0 +1,1 @@
+int a; /* unterminated, ending in a multibyte character: é

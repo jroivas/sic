@@ -239,33 +239,31 @@ from its own location.
    compiler is then the bootstrap with nothing swapped, and must pass check.sh
    as `SIC=sic/target/release/sic`. `-print-parts` and the
    `SIC_PARTS` errors are in from the start.
-6. **The lexer in SIC** (`sic/lexer/lexer.sic`, `module lexer`):
-   - **Entry point:** `Tokens Lex(string src, i32 lang, bool c23)`.
-   - **`Tokens` holds parallel lists:**
-     - `kind` (u16);
-     - `start`, `end`, `line` and `col` (u32);
-     - `file` (an index into `files`, a `list<string>`);
-     - `flags` (pack | hidden<<8);
-     - `text` (`list<string>`).
-   - **Errors:** `Err` with message, line and col.
-   - **Token kinds:** a SIC `enum` with explicit values, in the same order as
-     `TokenKind`. A Rust unit test compares the names through an exported
-     `KindName(i)`, so the two lists cannot drift.
-   - **Offsets: an improvement to make right away.**
-     - **What Rust does:** it copies the whole source into a `Vec<char>`, 4
-       bytes per character, and token offsets are char indices.
-     - **What SIC does:** it lexes the UTF-8 bytes in place and gives byte
-       offsets.
-     - **The glue:** franken's lex stage converts the offsets to char indices
-       for the Rust `Parser`, and builds `Vec<Token>`. This is recorded in
-       DIFFERENCES.md, and the SIC parser later uses bytes directly.
+6. **The lexer in SIC** (`sic/lexer/lexer.sic`, `module lexer`). Done
+   2026-11-27:
+   - **Entry point:** `Tokens Lex(string src, i32 lang, bool c23, bool wchar16)`.
+   - **`Tokens`:** structs with list fields don't cross `--emit-crate`, so the
+     tokens are one `u32` array, 8 words a token: kind and flags, byte and char
+     start and end, line, col, file. Literal texts, file names and system
+     headers are byte buffers. Pointer fields needed a fix to `--emit-crate`,
+     in 0.3.x.
+   - **Errors:** a message with its file, line and col.
+   - **Token kinds:** generated from `TokenKind`, in the same order; a Rust test
+     compares the names through `KindName(i)`, so the lists cannot drift.
+   - **Offsets:** the lexer reads the UTF-8 bytes in place, with no
+     `Vec<char>`, and counts characters as it goes: the Rust parser gets char
+     offsets, the SIC one will use bytes.
 7. **Pass.**
-   - **Diffs:** diff-lexer.sh is clean, or every difference is in
-     DIFFERENCES.md.
-   - **Speed:** lexing the amalgamation takes at most as long as the Rust
-     lexer, which the byte-based design should allow.
-   - **Tests:** check.sh passes with `SIC_PARTS=lexer`, and so do QEMU and
-     kernel builds.
+   - **Diffs:** done. diff-lexer.sh is clean on all 1050 files, including
+     `sic/tests/lexer`'s edge cases. The objects of every compile test and of
+     SQLite are byte-identical whichever lexer runs. DIFFERENCES.md has the one
+     deliberate difference, non-ASCII identifiers.
+   - **Speed:** done. On the amalgamation the SIC stage costs as many
+     instructions as the Rust lexer, and takes as long. Of that, the SIC
+     lexing is about 210 M instructions, Rust's about 270 M, and the rest is
+     building the Rust tokens.
+   - **Tests:** sic/check.sh passes with `SIC_PARTS=lexer`. QEMU and kernel
+     builds with it are still to run.
    - **Then:** the lexer joins the default set, and 0.4.0's CHANGELOG starts.
 
 ## Expected language gaps

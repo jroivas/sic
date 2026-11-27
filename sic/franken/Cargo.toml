@@ -20,6 +20,7 @@ llvm = ["sic/llvm"]
 
 [dependencies]
 sic = { path = "../../siccomp/crates/sic", default-features = false }
+sic-frontend = { path = "../../siccomp/crates/sic-frontend" }
 
 # Its own workspace: not one of siccomp's.
 [workspace]

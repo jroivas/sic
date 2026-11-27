@@ -1,2 +1,7 @@
 target/
 franken/Cargo.lock
+# What a part's build (--emit-crate) writes beside its source.
+*/lib*.a
+*/lib*.so
+*/module_*
+*/rust/

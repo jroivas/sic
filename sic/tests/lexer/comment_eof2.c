@@ -1,0 +1,1 @@
+int a; /* unterminated, ending in ASCII */ /* x

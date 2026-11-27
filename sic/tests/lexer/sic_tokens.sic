@@ -1,0 +1,20 @@
+// SIC's own tokens.
+i8 a = 1; i16 b; i32 c; i64 d; i128 e; u8 f; u16 g; u32 h; u64 i; u128 j; f32 k; f64 l; f128 m; f80 n;
+isize o; usize p; string q; bigint r; fixed s; any t; dict u; va_dict v; Task w; u8char x; va_array y;
+bool yes = true; bool no = false;
+int rot = 1 <<< 2 >>> 3 <> 4 << 5 >> 6 <<= 7 >>= 8;
+macro_rules! m { ($x:expr) => { $x } }
+x::y::z;
+list<int> l1; list *l2; list l3; list = 1; list); list
+set<int> s1; set *s2; set s3; set = 1; set	* s4; set	<int> s5;
+Fn<int(int)> f1; Fn f2; Fn = 3; weak<int> w1; weak w2;
+fallthrough; defer x; new int; del p; module m; import std; match (x) {} tuple t; atomic int a; bitfield b {}
+auto f = [](int x) => x + 1;
+string m1 = """
+    multi
+      line\t"quoted" \"""
+    end """;
+string m2 = r"""raw \n
+   keep  """;
+string m3 = """""";
+string m4 = """a""" """b""";
